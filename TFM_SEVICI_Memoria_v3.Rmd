@@ -1,0 +1,878 @@
+---
+coding: utf-8
+lang: es
+title: | 
+  | Trabajo Fin de Máster: Smart Bike - Sevilla. 
+  | Memoria.
+subtitle: Máster en Data Science y Big Data - Universidad de Sevilla, 2016/2017.
+author: Jerónimo Carranza Carranza
+date: 1 de marzo de 2018
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_height: 3.8
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  html_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[LO,LE]{}
+- \fancyhead[RO,RE]{}
+- \fancyhead[CO,CE]{\thetitle}
+- \fancyfoot[LE,RO]{}
+- \fancyfoot[CE,CO]{\thepage}
+- \fancyfoot[RE,LO]{}
+- \renewcommand{\headrulewidth}{0.2pt}
+- \renewcommand{\footrulewidth}{0.2pt}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+---
+\listoftables
+\listoffigures
+\newpage
+
+```{r setup, include=FALSE}
+# options(width=70)
+knitr::opts_chunk$set(comment = "##"
+                      , warning = FALSE
+                      , message = FALSE
+                      , echo = FALSE
+                      , tidy = FALSE
+                      , size="small"
+                      , cache = FALSE
+                      )
+```
+
+
+```{r cache=FALSE}
+library(RPostgreSQL)
+# library(tidyverse)
+#library(tidyr)
+# library(dtplyr)
+# library(dbplyr)
+library(dplyr)
+library(knitr)
+library(sp)
+library(sf)
+library(ggplot2)
+library(ggcorrplot)
+library(ggspatial)
+library(lubridate)
+library(scales)
+library(factoextra)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(ggdendro)
+
+```
+
+```{r echo=FALSE, cache=FALSE}
+con = dbConnect(drv = dbDriver("PostgreSQL"), 
+                dbname='sevici', user='postgres')
+```
+
+```{r echo=FALSE, cache=FALSE}
+# Función general para facilitar respuesta rápida
+
+dbQueryIf = function(qname,conn,query){
+  if(!qname %in% dbListTables(conn))
+    dbSendStatement(conn, 
+      paste0('CREATE TABLE IF NOT EXISTS ', qname, ' AS ', query))
+  dbGetQuery(conn, paste0('SELECT * FROM ',qname,';'))
+}
+```
+
+```{r echo = FALSE}
+
+if (!"seviesta" %in% ls()){
+seviesta = dbGetQuery(con, 'SELECT * FROM seviesta;')
+}
+
+```
+
+```{r}
+set.seed(12345)
+
+```
+
+
+# Introducción
+
+## Situación
+
+Los **_Sistemas de Bicicletas Compartidas_** (Bycicle Sharing System), también conocidos como sistemas de bicicletas públicas, ponen a disposición de un grupo de usuarios una serie de bicicletas para que sean utilizadas temporalmente como medio de transporte. Normalmente estos sistemas son gestionados por un estamento público y permiten recoger una bicicleta y devolverla en un punto diferente, para que el usuario sólo necesite tener la bicicleta en su posesión durante el desplazamiento. [^1]
+
+[^1]: Wikipedia. https://es.wikipedia.org/wiki/Sistema_de_bicicletas_compartidas. Consultado 21 de febrero de 2018.
+
+Los sistemas de bicicletas compartidas son un modo de movilidad urbana que se ha extendido de forma muy notable en ciudades de todo el mundo y con una gran aceptación de público. Existen más de 1400 sistemas activos en el mundo, con una flota operativa de más de 14 millones de bicicletas. [^2]
+
+[^2]: http://www.itoworld.com/wp-content/uploads/2017/11/bikeshare-draft-v7.2lr.mp4]. Consultado 21 de febrero de 2018.
+
+Los sistemas para compartir bicicletas han sufrido cambios que pueden clasificarse en tres fases clave o generaciones. Estos incluyen la primera generación, llamada _bicicletas blancas_ o bicicletas gratuitas (Amsterdam, 1965); la segunda generación de sistemas de _depósito de monedas_ (Copenhagen, 1995); y la tercera generación, o sistemas basados en tecnología de la información o _smart bikes_ (Rennes, 1998). Las recientes mejoras tecnológicas y operacionales también están allanando el camino para una cuarta generación, conocida como sistema multimodal sensible a la demanda. [^3] [^4]
+
+[^3]: Wikipedia. https://en.wikipedia.org/wiki/Bicycle-sharing_system. Consultado 21 de febrero de 2018.
+
+[^4]: Susan Shaheen & Stacey Guzman (Fall 2011). "Worldwide Bikesharing". Access Magazine No. 39. University of California Transportation Center. 
+
+
+Todos los esquemas de uso compartido de bicicletas que se han desarrollado a lo largo de los años están basados en uno o más de los siguientes sistemas:
+
+_No regulado_: En este tipo de programa, las bicicletas se distribuyen simplemente en una ciudad o área determinada para que las use cualquier persona.
+
+_Depósito_: Un pequeño depósito en efectivo libera la bicicleta de una terminal bloqueada y solo se puede recuperar devolviéndola a otra.
+
+_Afiliación_: En esta versión del sistema, las bicicletas se guardan en centros operados por personal o en terminales de autoservicio distribuidos en toda la ciudad. Las personas registradas en el servicio se identifican con su tarjeta de usuario (o con una tarjeta inteligente, por teléfono celular u otros métodos) en cualquiera de los centros para hacer uso de una bicicleta por un período corto de tiempo, por lo general de tres horas o menos. En muchos esquemas, la primera media hora es gratis. El individuo es responsable de cualquier daño o pérdida hasta que la bicicleta se devuelva a otro centro y se registre. Muchos de estos sistemas de afiliación se operan a través de asociaciones de instituciones públicas con empresas privadas (JCDecaux, Clear Channel, Smoove, etc.).
+
+_Sin estaciones_: Las sistemas de bicicletas sin estaciones están diseñados para que un usuario no necesite devolver la bicicleta a un centro o un punto de anclaje en una estación; sino que, el próximo usuario puede encontrarlo por GPS. Este tipo de sistemas se han desarrollado de forma muy rápida, sobre todo en China desde 2010, impulsadas por la iniciativa privada (Mobike, Ofo, etc.). [^3]
+
+
+## Justificación
+
+En los sistemas de afiliación con estaciones, los más extendidos a nivel mundial, cada estación está dotada con una serie de sensores que indican en tiempo real el número de bicicletas que se pueden retirar así como el total de plazas libres en las que se pueden devolver. El estado actual del sistema, es decir el estado de todas sus estaciones, es publicado por la entidad que lo gestiona a través de servicios web, por lo que pueden ser recolectados, tratados y analizados con el objetivo de mejorar el propio sistema o adaptar aquellos que se vean influenciados por él.
+
+Aunque hay diversos estándares para la publicación de los datos como por ejemplo General Bikeshare Feed Specification (GBFS), empleado por algunos sistemas en Estados Unidos, la mayoría de las compañías no siguen ninguno, proporcionando diferentes datos y estructurándolos, así mismo, de distinta forma. Por lo tanto, la unificación de los mismos es imprescindible si se pretende realizar un estudio con datos de más de un sistema al mismo tiempo. Por otro lado, la mayoría de los entidades no publican un histórico de los datos, únicamente se puede acceder al estado actual del sistema, por lo que, a priori, no es posible realizar un estudio que abarque periodos de tiempo.
+
+Existen aplicaciones como Citybikes que, además de almacenar el estado actual de más de 400 sistemas, permite acceder a ellos mediante servicios web. O, la aplicación creada por el investigador de University College London (UCL) Bike Share Map que publica a través de la web los datos de las últimas 24 horas de más de 100 sistemas.
+
+Si bien se dispone de servicios que unifican múltiples sistemas en tiempo real, no existe ninguno que, además, facilite los datos durante un periodo temporal de más de 24 horas por lo que resulta imposible realizar un estudio histórico [^6].
+
+[^6]: http://opendatalab.uhu.es/index.php/TFG. Consultado 21 de febrero de 2018.
+
+Con el objetivo de disponer de datos históricos de múltiples sistemas de bicicletas compartidas para el desarrollo de estudios diversos sobre los mismos, investigadores de las universidades de Sevilla y Huelva llevan algún tiempo almacenando datos sobre el uso de bicicletas públicas de 27 ciudades europeas. En concreto de los datos instantáneos publicados por la empresa JCDecaux, que opera las ciudades de: Amiens, Besancon, Bruxelles-Capitale, Cergy-Pontoise, Creteil, Goteborg, Kazan, Lillestrom, Ljubljana, Luxembourg, Lyon, Marseille, Mulhouse, Mulhouse, Namur, Nancy, Nantes, Paris, Rouen, Santander, Seville, Stockholm, Toulouse, Toyama, Valence, Vilnius. 
+
+
+## Objetivos
+
+Se plantea como objetivo de este trabajo, el análisis y modelado de los datos históricos recopilados del sistema de bicicletas compartidas de la ciudad de Sevilla (Sevici), y más concretamente:
+
+1) Identificar patrones espacio-temporales del uso de bicicletas de Sevici.
+
+2) Predecir índices de ocupación de las estaciones de Sevici.
+
+
+\newpage
+# Resumen ejecutivo
+
+En base a la información histórica recopilada por las Universidades de Huelva y Sevilla relativa al número de bicicletas disponibles en cada estación en el periodo comprendido entre el 1 de diciembre de 2015 y el 30 de noviembre de 2016, se ha podido caracterizar el patrón espacio-temporal del uso de bicicletas de Sevici en la ciudad de Sevilla y construir modelos predictivos de su uso para horizontes temporales de corto alcance (15min, 30min, 1h, 4h, 8h y 24h).
+
+El patrón temporal de uso de bicicletas de Sevici pone de manifiesto que este servicio funciona preferentemente como medio de transporte público (complementario) para los desplazamientos relacionados con la actividad laboral o académica en la ciudad. Así lo atestiguan los resultados siguientes:
+
+- El número total de bicicletas disponibles en fin de semana o festivo es mayor que en los días laborables en general.
+
+- El número total de bicicletas disponibles a lo largo del día tiene dos mesetas; una de madrugada y otra en el tramo horario de actividad laboral más frecuente.
+
+- Los descensos del número de bicicletas disponibles más acusados a lo largo del día tienen lugar entorno a las 8:00, las 14:00 y las 20.00.
+
+![Total de Bicis disponibles en el conjunto de estaciones por hora del día.](img/BicisTotales_HoraDia.png)
+
+![Total de Bicis disponibles en el conjunto de estaciones por hora del día y día de la semana.](img/BicisTotales_DiaSemana_HoraDia.png)
+
+La clasificación de las estaciones en base al parecido de su comportamiento temporal nos ha permitido obtener un patrón espacio-temporal en el que se refuerza la conclusión señalada anteriormente y en el que se puede apreciar cómo del análisis del uso de las bicicletas podría deducirse el papel funcional preferente en la trama urbana de las áreas en que se ubican las estaciones. El mapa de estaciones clasificadas y los patrones temporales de cada una de las clases de estación ponen lo dicho claramente de manifiesto.
+
+Puede apreciarse una distribución espacial de las cinco clases identificadas muy concentrada o compacta, esto es, sería posible establecer una zonificación con un número de zonas casi homogéneas relativamente bajo (entre los vecinos de cada estación son en general mayoría los de su misma clase). Se aprecia así mismo una disposición con cierto carácter concéntrico para las clases. 
+
+* La clase 4 ocupa una posición central extendiéndose por parte del casco histórico de la ciudad, los barrios de Nervión, Los Remedios, Felipe II.
+
+* La clase 3 ocupa la primera corona entorno a la clase 4, en Triana, centro Norte - Macarena, Santa Justa, Provenir, Tiro de Linea - La Paz.
+
+* La clase 2 ocupa toda la Isla de la Cartuja, todo el entorno de La Palmera (Sur) y núcleos menores en Nervión, Macarena, Sevilla-Este, Alcosa-Torreblanca y Bellavista.
+
+* La clase 1 ocupa la periferia Norte y Este adentrándose hacia el centro sobre todo por el norte (Macarena, Alameda).
+
+* La clase 5 está en exclusiva en Parque Alcosa-Torreblanca y una estación en Bellavista. 
+
+Las zonas de Sevilla-Este, Parque Alcosa-Torreblanca (al Este), Bellavista (al Sur) y posiblemente también San Jerónimo (al Norte) están suficientemente distanciadas del resto como para generar dinámicas propias con patrones de centralidad distintos, lo que podría explicar la distribución de clases que se observan en las mismas.
+
+
+![Mapa de estaciones clasificadas.](img/Mapa_Estaciones_Clasificadas_5clases.png)
+
+![% Bicis disponibles por hora del día y día de la semana. Patrones según clase de estación.](img/PctBicisDisponibles_PatronesTemporales_por_ClaseEstacion.png)
+
+Los datos recopilados por las Universidades de Huelva y Sevilla han permitido también la construcción de modelos predictivos del número de bicicletas disponibles en las estaciones de Sevici.
+
+Se considera en los modelos desarrollados que para cada estación (i) en un momento determinado (t), el número de bicicletas disponibles (Y(i,t)) es una función lineal de:
+
+- los valores de dicha variable en esa estación en momentos anteriores:
+
+    $Y(i,t-15min), Y(i,t-30min), Y(i,t-1h), Y(i,t-4h), Y(i,t-8h), Y(i,t-24h)$
+
+- los valores de dicha variable en la estación más cercana a ella (j) en momentos anteriores:    
+
+    $Y(j,t-15min), Y(j,t-30min), Y(j,t-1h), Y(j,t-4h), Y(j,t-8h), Y(j,t-24h)$
+    
+- el día de la semana que es t $DSEM$, 
+- la hora del día del momento t $HORA$,
+- si es día festivo $FEST$,
+- si es fin de semana o festivo $FSOF$,
+- temperatura máxima del día $TMAX$, 
+- temperatura mínima del día $TMIN$
+- precipitación total del día $P$
+
+Los modelos predictivos desarrollados son modelos de regresión con regularización Elasticnet. En total se han estimado 1813 modelos, siete por cada una de las estaciones.
+
+Se toman para el modelado sólo los casos completos existentes en el conjunto de datos, lo que supone 52543 casos para 1834 variables (originales y retardadas).
+
+Los resultados del testeo de los modelos han puesto de manifiesto una muy buena capacidad predictiva, con errores (RMSE, raíz del error medio cuadrático), bajos, 17.59 en media y mediana de 15.51. Hay que tener en cuenta que RMSE se mide en las mismas unidades que la variable objetivo de predicción, en nuestro caso porcentaje de bicicletas disponibles.
+
+La bondad de los modelos por tipo es también bastante buena, si bien, como era esperable con un notable incremento del error a medida que se dispone de menor información para la predicción. En los modelos con disponibilidad de información muy reciente (15min), la bondad del ajuste, se dispara con R2 muy próximo a 1 y RMSE entorno a 5. Para un horizonte de predicción de 4h, RMSE se sitúa entorno a 20, con 24h en 26 y para horizontes más lejanos, el RMSE está entorno a 32.
+
+![Bondad de ajuste. Raíz del error cuadrático medio (RMSE) por tipo de modelo.](img/RMSExTipoModelo.png)
+
+![Distribución de residuos por tipo de modelo.](img/DistribucionResiduosxTipoModelo.png)
+
+\newpage
+# Metodología
+
+## Descripción del conjunto de datos. Obtención y carga de datos
+
+### Datos dinámicos Sevici
+
+Como se ha comentado en la introducción los datos provienen de una recopilación realizada por la Universidades de Huelva y Sevilla, que captura los datos instantáneos ofrecidos a través de un servicio web por JCDecaux en 27 ciudades en las que opera los servicios de bicicletas compartidas. 
+
+El punto de partida ha sido un fichero comprimido que contiene para cada ciudad un conjunto de backups (mysql) en formato sql correspondiente cada uno de ellos a los datos registrados en las distintas estaciones de la ciudad en un día y que en la base de datos se corresponde cada uno con una tabla de igual nombre al fichero sql (salvo extensión).
+
+Se ha creado un base de datos (MariaDB) con igual nombre a la original, _pfcbicis_, y se ha realizado la importación de los datos con script bash.
+
+Se han creado así 365 tablas correspondientes a cada uno de los días entre 2015-12-01 y 2016-11-30. Todas ellas con el mismo esquema.
+
+Table: Sevici. Datos dinámicos.
+
+Campo:           | Descripción: 
+-----------------|---------------------------------------------------------
+id               | Id registro autonumérico
+status           | Estado de la estación; OPEN o CLOSED
+contract         | Contrato, en nuestro caso; Seville
+num              | Número de la estación
+last_update      | Momento de última actualización
+add_date         | Fecha-Hora en fracciones de 5 minutos
+stands           | Número de estacionamientos operativos en la estación
+availablestands  | Número de estacionamientos disponibles
+availablebikes   | Número de bicicletas operativas y disponibles
+
+
+### Datos estáticos Sevici
+
+Al margen de los datos anteriormente descritos, que corresponde a los denominados datos dinámicos, en la página web del operador  (https://developer.jcdecaux.com/#/opendata/vls?page=static) están disponibles los denominados datos estáticos que hacen referencia a las características de las estaciones. Esta información se ha descargado en formato csv y contiene los siguientes datos para un total de 260 estaciones:
+
+Table: Sevici. Datos estáticos.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+Number          | Número de la estación
+Name            | Nombre de la estación
+Address         | Dirección
+Latitude        | Latitud (grados WGS84)
+Longitude       | Longitud (grados WGS84)
+
+
+Los datos originales, descritos hasta aquí, se han reorganizado de diversas formas para los diversos pretratamientos y tratamientos realizados.
+
+
+### Datos meteorológicos
+
+Se han obtenido otros datos de interés para el estudio que incluye datos meteorológicos; precipitación y temperaturas, descargados de https://datosclima.es.
+
+Los datos meteorológicos pertenecen a las estaciones de Aeropuerto de San Pablo y Tablada. Se ha obtenido una combinación de los registros de ambas estaciones que incluye para cada día la precipitación total (máxima de las dos estaciones), temperatura máxima (máxima) y temperatura mínima (mínima).
+
+Table: Estructura de _Meteo_.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+fecha           | Fecha
+p               | Precipitación total
+tmax            | Temperatura máxima
+tmin            | Temperatura mínima
+
+
+### Calendario de festivos
+
+Un factor de interés para el estudio es obviamente el calendario laboral en el periodo considerado. Dicha información se ha incorporado manualmente a la base de datos en forma de tabla con la siguiente estructura:
+
+Table: Estructura de _Festivos_.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+fecha           | Fecha del día festivo
+festivo         | Festivo
+
+
+## Pretratamiento y depuración
+
+Para facilitar los tratamientos posteriores se ha unificado la información de las 365 tablas diarias en una sola tabla ( _sevidata_) y se han creado tablas con los datos estáticos ( _seviesta_), datos meteorológicos ( _meteo_) y festivos ( _festivos_).
+
+Sobre los datos ya unificados se ha realizado un primer análisis encaminado a la identificación de posibles deficiencias en los mismos. 
+
+
+### Localización de estaciones
+
+Los datos estáticos de Sevici relativos a la identificación y ubicación de estaciones no muestran indicios de errores relevantes, ubicándose por sus coordenadas en las direcciones que le dan nombre. Las figuras siguientes muestran su localización sobre distintos mapas base con indicación de su codificación.
+
+
+![Mapa de Estaciones Sevici sobre BingMap.](img/Sevici-number-bing_minipoint.png)
+
+![Localización de estaciones SEVICI sobre OSM - 'hikebike'](img/Mapa_Sevici_OSM_hikebike.png)
+
+![Localización de estaciones SEVICI sobre OSM - 'cartolight'](img/Mapa_Sevici_OSM_cartolight.png)
+
+
+### Datos replicados
+
+En teoría la combinación (num - add_date) debe ser única, esto es, para cada estación y periodo (de 5min) debe haber un único registro.
+
+Todas las estaciones, salvo la estación 109, presentan 12 datos duplicados que se concentran en un día, entre 2016-10-30 02:00:01 y 2016-10-30 02:55:01.
+
+259 x 12 x 2 = `r eval(259*12*2)` que es el número total de réplicas.
+
+Volviendo a los datos originales (backups) se comprueba que todos se encuentran en la tabla *z_Seville_2016_10_30*.
+
+Para facilitar el manejo de duplicados y otras incidencias en los datos, antes en su caso de eliminación de los registros implicados, se modifica la estructura de _sevidata_ añadiendo un campo indicador, _ok_, para recoger las distintas incidencias. Se crea también un índice *ok_idx* para acelerar filtrados.
+
+- Sin incidencia:  ok = 1.
+- Duplicado:  ok = 2.
+
+
+### Datos faltantes
+
+Para identificar los posibles huecos en las series temporales de cada estación, vamos en primer lugar a obtener la secuencia temporal de 5 min de paso, para el conjunto de las estaciones, esto es, el listado ordenado de valores únicos de la columna *add_date*.
+
+El listado lo forman 104170 registros. Como ya se ha señalado anteriormente el número teórico de registros entre inicio y fin  para cada estación es de 105120 (365 días x 24 horas x 12 p5min), a lo que hay que añadir 12 registros adicionales hasta las 00:55:01 del día de fin 2016-11-30 (105132), lo que supone que existen 962 huecos de 5min sin datos que afectan a la totalidad de las estaciones. El número total de huecos entre todas las estaciones será obviamente muy superior y al menos de ese tamaño para cada estación.
+
+Para explorar los huecos de datos faltantes se construye una serie entre inicio y fin con paso de 5min y se vincula al minuto con la secuencia real de *add_date* allí donde exista.
+
+La variable _hueco_ indica si es un hueco global o no, es decir, si no existe ningún dato para ninguna estación en ese momento (TRUE) o existe al menos una con datos.
+
+La distribución temporal de los huecos globales por fecha y hora se muestra en la figura siguiente.
+
+El número total de huecos en el conjunto de datos es 936353 de los cuales  81533 corresponden a la estación 109 que sólo estuvo en funcionamiento durante aproximadamente los tres primeros meses de estudio. Excluyendo la estación 109 se tendrán 854820 huecos. 
+Recordar que el número de periodos de 5min que afectan a la totalidad de estaciones es de 962, lo que supone un total de 962 x 259 = 249158 huecos globales, excluida la estación 109, y por tanto, el número de huecos en los que existe al menos una estación con datos es de 605662.
+
+
+Table: Resumen de huecos en datos dinámicos
+
+Variable                                | Valor
+----------------------------------------|-------: 
+Número de huecos                        |936353
+Número de huecos en estación 109        |81533
+Número de huecos sin estación 109       |854820
+Número de p5min con huecos globales     |962
+Número de huecos globales (sin e109)    |249158
+Número de huecos específicos (sin e109) |605662
+
+
+
+![Datos faltantes. Huecos Globales por Fecha y Hora](img/HuecosGlobales_Fecha_Hora.png)
+
+### Datos anómalos
+
+Entre los datos anómalos se consideran las siguientes situaciones:
+
+a) Número de estacionamientos disponibles mayor que operativos
+b) Número de bicicletas disponibles mayor que estacionamientos operativos
+c) Suma de estacionamientos disponibles y bicicletas disponibles mayor que el número de estacionamientos operativos.
+d) Suma de estacionamientos disponibles y bicicletas disponibles menor que el número de estacionamientos operativos.
+
+Se codifican dichas situaciones en la tabla _sevidata_ en el campo _ok_ con los siguientes valores: a) --> ok = 3    b) --> ok = 4     c) --> ok = 5   d) --> ok = 6 
+
+
+Se muestra seguidamente el resumen incidencias relativas a datos duplicados y anómalos identificados
+
+Table: Resumen de incidencias por datos duplicados o anómalos
+
+ok    | Descripción                                                  | N
+------|--------------------------------------------------------------|---------:
+1     | Sin incidencia aparente                                      |22094898
+2     | Dato duplicado                                               |3108
+3     | Estacionamientos disponibles > Est. operativos               |954
+4     | Bicicletas disponibles > Est. operativos                     |965
+5     | Estacionamientos + Bicicletas disponibles > Est. operativos  |5728
+6     | Estacionamientos + Bicicletas disponibles < Est. operativos  |4367165
+
+
+El número de datos anómalos representa el 16.54% del total de datos registrados. De todos ellos la situación más frecuente, con diferencia, es aquélla en la que la suma de estacionamientos disponibles y bicicletas disponibles es menor que el número de estacionamientos operativos (ok=6), con un 16.50% del total de registros. 
+
+La situación anómala descrita, ok=6, podría en teoría responder a retrasos puntuales en la transmisión de datos. 
+
+Es necesario tener en cuenta que el número de estacionamientos operativos se ha comprobado que aparece como constante durante todo el periodo estudiado para todas las estaciones, que es lo realmente sorprendente, si dicho dato se obtiene de modo similar al de disponibilidad de estacionamientos y bicicletas.
+
+Tanto si responde a retrasos puntuales como al no correcto registro de los momentos de inoperatividad, la consideración del número efectivo de estacionamientos operativos como la suma de estacionamientos y bicicletas disponibles siempre que ésta sea menor o igual al número registrado de estacionamientos operativos (nominal) permite tener en consideración estas situaciones (ok=6) como registros válidos y tratarlos de forma conjunta a los de la situación sin incidencia aparente (ok=1).
+
+
+## Análisis exploratorio
+
+Se consideran como datos válidos, entre los datos dinámicos Sevici, todos aquellos provenientes de registros no duplicados en los que la suma de estacionamientos y bicis disponibles es menor o igual que el número (nominal) de estacionamientos operativos. Son datos válidos globales la agregación de datos válidos entre todas las estaciones en un momento determinado.
+
+Se ha realizado el análisis exploratorio de los datos válidos, tanto datos globales como por estaciones. Básicamente análisis gráfico y resúmenes estadísticos con respecto a agregados temporales y variables meteorológicas.
+
+
+## Clasificación de estaciones e identificación de patrones espacio-temporales
+
+Para el análisis de clasificación de estaciones e identificación de patrones se parte de _sevicip5m_. Este dataframe tiene las 105132 filas correspondientes a los periodos de cinco minutos entre inicio y fin y las 522 columnas correspondientes a:
+
+Table: Estructura _sevicip5m_
+
+Variable | Descripción
+---------|-----------------
+p5min    | Periodo de 5min (Datetime)
+hueco    | Hueco global (Boolean)
+si       | Estacionamientos disponibles estación i  
+bi       | Bicicletas disponibles estación i
+:        |    para i en 1:260
+
+A partir de estos datos se ha calculado la matriz de correlación (Pearson) entre estaciones para la variable número de bicicletas disponibles. Dada la presencia de datos faltantes en gran número se ha optado por utilizar para cada celdilla de la matriz los casos en que existen datos disponibles para el par de variables (pairwise).
+
+La matriz de correlación obtenida se ha segregado en un dataframe con todos los pares y el valor de correlación, para su tratamiento posterior como grafo (con nodos geoposicionados), lo que ha permitido realizar representaciones en forma de mapa de las correlaciones temporales entre estaciones.
+
+Se utiliza la matriz de correlación como base para la clasificación de las estaciones.
+Para ello en primer lugar convertimos los coeficientes de correlación en disimilaridades y éstas son tratadas como distancias. Se realiza un análisis cluster jerárquico con la matriz de distancias así obtenida. En dicho análisis se han comparado los resultados obtenidos para los distintos métodos de agregación del paquete _hclus_. Se opta finalmente por el método ' _complete_', que visualmente muestra mayor coherencia espacial. En este método de agregación, la distancia entre dos clusters se define como la máxima distancia entre sus componentes individuales.
+
+Unas vez clasificadas las estaciones según el método descrito, se ha obtenido la estadística básica del número de bicis disponibles por clase de estación, día de la semana y hora del día y su representación gráfica.
+
+Finalmente se contrasta la validez de los patrones espacio-temporales identificados mediante la construcción de un modelo lineal general con las variables independientes clase de estación, día de la semana y hora del día y variable dependiente el número de bicicletas disponibles.
+
+Los datos para construir el modelo no son los datos completamente desagregados sino que se utilizan las medias del número de bicicletas disponibles por estación, fecha y hora. Este conjunto de datos tiene más de 2 millones de registros.
+
+
+## Modelos predictivos
+
+Se considera en los modelos que para cada estación (i) en un momento determinado (t), el número de bicicletas disponibles (Y(i,t)) es una función lineal de:
+
+- los valores de dicha variable en esa estación en momentos anteriores:
+
+    $Y(i,t-15min), Y(i,t-30min), Y(i,t-1h), Y(i,t-4h), Y(i,t-8h), Y(i,t-24h)$
+
+- los valores de dicha variable en la estación más cercana a ella (j) en momentos anteriores:    
+
+    $Y(j,t-15min), Y(j,t-30min), Y(j,t-1h), Y(j,t-4h), Y(j,t-8h), Y(j,t-24h)$
+    
+- el día de la semana que es t $DSEM$, 
+- la hora del día del momento t $HORA$,
+- si es día festivo $FEST$,
+- si es fin de semana o festivo $FSOF$,
+- temperatura máxima del día $TMAX$, 
+- temperatura mínima del día $TMIN$
+- precipitación total del día $P$
+
+Dieciocho variables regresoras que, al convertir en binaria $DSEM$, con siete niveles, pasan a ser 24.
+
+Para cada momento (t) se realizará la predicción para t, t+15min, t+30min, t+1h, t+4h, t+8h y t+24h.
+
+El modelo predictivo desarrollado es un modelo de regresión con regularización Elasticnet.
+
+Se toman para el modelado sólo los casos completos existentes en el conjunto de datos, lo que supone 52543 casos para 1834 variables (originales y retardadas). No se utilizan los datos de la estación 109, que sólo dispone de datos durante los tres primeros meses de registro.
+
+Se obtienen muestras relativamente pequeñas para training (14%) y test (6%) a partir de una división del conjunto de datos con fecha de corte 2016-09-15, que deja aproximadamente el 70% de las observaciones a su izquierda (anteriores) y aproximadamente el 30% a su derecha (posteriores). Se garantiza así que toda la muestra test sea posterior a la muestra de entrenamiento.
+
+Se utilizan modelos con optimización de parámetros por validación cruzada según implementa el paquete de R _glmnet_.
+
+\newpage
+# Principales resultados y conclusiones
+
+## Análisis exploratorio
+
+Se presentan aquí datos y resultados relevantes del análisis exploratorio.
+
+### Datos meteorológicos
+
+```{r}
+if (!"meteo" %in% ls()){
+  meteo = dbGetQuery(con,"select * from meteo;")
+}
+```
+
+```{r}
+kable(summary(meteo), align = 'r',
+      caption = "Resumen estadístico de variables meteorológicas")
+```
+
+```{r fig.cap='Datos meteorológicos. Serie de precipitación total diaria.'}
+
+ggplot(meteo)+
+  #geom_line(aes(fecha, p), colour = "blue")+
+  geom_linerange(aes(x=fecha, ymin=0, ymax=p), colour = "blue")+
+  labs(x="Fecha", y="Precipitación (mm)")+
+  scale_x_date(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos meteorológicos. Series de temperaturas máximas y mínimas diarias.'}
+
+ggplot(meteo)+
+  geom_line(aes(fecha, tmax), colour = "orange")+
+  geom_line(aes(fecha, tmin), colour = "cyan")+
+  labs(x="", y="Temperatura (ºC)")+
+  scale_x_date(date_minor_breaks = "1 month")
+```
+
+
+### Análisis de datos válidos globales
+
+
+```{r}
+
+if (!"datos_validos_globales" %in% ls()){
+ datos_validos_globales =
+  dbQueryIf('datos_validos_globales',con,
+  'SELECT add_date as p5min,
+    date(add_date) as fecha,
+    EXTRACT(ISODOW FROM add_date) as dsem,
+    count(num) as nn,
+    date(add_date) in (select fecha from festivos) as fest,
+    sum(stands) as st,
+    sum(availablestands) as ss,
+    sum(availablebikes) as sb,
+    avg(stands) as avt,
+    avg(availablestands) as avs,
+    avg(availablebikes) as avb
+    FROM sevidata WHERE ok = 1 or ok = 6
+    GROUP BY add_date ORDER BY add_date;')
+}
+
+```
+
+```{r}
+datos_validos_globales$dsem = factor(datos_validos_globales$dsem, 
+        labels = c('L','M','X','J','V','S','D'))
+```
+
+```{r}
+datos_validos_globales$fsof = 
+  datos_validos_globales$fest | (datos_validos_globales$dsem %in% c('S','D'))
+```
+
+```{r}
+datos_validos_globales$hora = hour(datos_validos_globales$p5min)
+```
+
+La figura siguiente muestra el número bicis disponibles a lo largo del periodo de estudio estimada a partir de la media y expandida al conjunto de estaciones. Se aprecia una ligera tendencia ascendente en el periodo.
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, 260*avb), colour = "orange")+
+  labs(x="Tiempo", y="Bicis disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+
+```{r fig.cap='Datos válidos globales. Distribución de Estacionamientos y Bicis disponibles.'}
+
+ggplot(datos_validos_globales)+
+  # geom_histogram(aes(ss)) +
+  geom_histogram(aes(260*avs), color = 'blue', alpha = 0.1) +
+  geom_histogram(aes(260*avb), color = 'orange', alpha = 0.1) +
+  annotate('text', x=3500, y=40000, label='Estacionamientos \n disponibles', color='blue') +
+  annotate('text', x=1500, y=40000, label='Bicis \n disponibles',
+           color='orange') +
+  labs(x="Número", y="Frecuencia")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Diferencia Estacionamientos y Bicis disponibles.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, 260*(avs-avb)), colour = "green")+
+  geom_smooth(aes(p5min, 260*(avs-avb)), method = lm, colour = "red")+
+  labs(x="Tiempo", y="Diferencia")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+El número de estacionamientos disponibles, asimilable en cierta forma a bicicletas circulantes o en uso, es superior al de bicis disponibles a lo largo de todo el periodo analizado (salvo a finales de marzo, semana santa). Fenómeno con una aparente tendencia a su reducción.
+
+
+#### Análisis según días de la semana y festivos
+
+```{r}
+datos_validos_globales %>% group_by(dsem) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles por día de la semana. 
+        Estadística básica.', digit=1)
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles por día de la semana. Media +/- 2·Desviación'}
+
+datos_validos_globales %>% group_by(dsem) %>% 
+  summarise(mean = mean(260*avb), sd=sd(260*avb)) %>% 
+  ggplot() + 
+    geom_pointrange(aes(x=dsem,y=mean,ymax=mean+2*sd,ymin=mean-2*sd),
+                    color='orange')+
+    labs(x="Día de la semana", y="Bicis disponibles")
+
+```
+
+
+```{r}
+datos_validos_globales %>% group_by(fsof) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles según sea 
+          fin de semana - festivo o no. Estadística básica.',
+        digits = 1)
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según sea fin de semana - festivo o no.'}
+
+ggplot(datos_validos_globales)+
+  geom_boxplot(aes(fsof, 260*avb, group=fsof), colour = 'blue')+
+  labs(x="Fin de semana o festivo", y="Bicis disponibles")
+```
+
+
+#### Análisis según hora del día
+
+
+```{r}
+datos_validos_globales %>% group_by(hora) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles por hora del día. Estadística básica.', digits = 1)
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según hora del día.'}
+
+ggplot(datos_validos_globales)+
+  geom_boxplot(aes(hora, 260*avb, group=hora), color = 'blue')+
+  scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+  labs(x="Hora del día", y="Bicis disponibles")
+```
+
+
+#### Análisis según hora del día y día de la semana
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según hora del día y día de la semana.'}
+
+datos_validos_globales %>% group_by(dsem, hora) %>% 
+  summarise(mean = mean(260*avb)) %>% 
+  ggplot()+
+    geom_tile(aes(x=hora, y=dsem, fill=mean))+
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(y="Día de la semana", x="Hora del día")
+```
+
+
+#### Análisis según condiciones meteorológicas
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según precipitación total diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=p,y=avb), color='blue')+
+    geom_smooth(aes(p, avb), method = lm, color="red")+
+    labs(y="Bicis disponibles", x="Precipitación (mm)")
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según temperatura mínima diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=tmin,y=avb), color='cyan')+
+    geom_smooth(aes(tmin, avb), method = lm, color = "red")+
+    labs(y="Bicis disponibles", x="Temperatura mínima (ºC)")
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según temperatura máxmima diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=tmax,y=avb), color='orange')+
+    geom_smooth(aes(tmax, avb), method = lm, color = "red")+
+    labs(y="Bicis disponibles", x="Temperatura máxima (ºC)")
+```
+
+## Clasificación de estaciones e identificación de patrones espacio-temporales
+
+### Análisis de correlación entre estaciones
+
+La matriz de correlación entre estaciones se muestra de forma gráfica en la siguiente figura. En ella se representan las celdas con un coeficiente de correlación en valor absoluta mayor de 0.5.
+
+![Matriz de correlación (|corr|>0.5) entre estaciones.](img/RepGrafica_MatrizCorrelacion.png)
+
+La figura siguiente muestra una representación de la matriz de correlación en forma de grafo con nodos georreferenciados. Se muestran los arcos que conectan estaciones correladas en valor absoluto mayor de 0.5 distinguiéndose por color las correlaciones positivas y negativas.
+
+![Grafo espacial de correlaciones |corr|> 0.5.](img/RepGrafoMapa_MatrizCorrelacion.png)
+
+### Clasificación de las estaciones
+
+La figura siguiente muestra el dendrograma de clasificación de estaciones en base a los datos de la matriz de correlación. 
+
+![Dendrograma de estaciones basado en correlación.](img/Dendrograma_Estaciones.png)
+
+La clasificación de estaciones obtenida del proceso se muestra en forma de mapa en la siguiente figura.
+
+![Mapa de estaciones clasificadas](img/Mapa_Estaciones_Clasificadas_5clases.png)
+
+Puede apreciarse una distribución espacial de las cinco clases identificadas muy concentrada o compacta, esto es, sería posible establecer una zonificación con un número de zonas casi homogéneas relativamente bajo (entre los vecinos de cada estación son en general mayoría los de su misma clase). Se aprecia así mismo una disposición con cierto carácter concéntrico para las clases. 
+
+* La clase 4 ocupa una posición central extendiéndose por parte del casco histórico de la ciudad, los barrios de Nervión, Los Remedios, Felipe II.
+
+* La clase 3 ocupa la primera corona entorno a la clase 4, en Triana, centro Norte - Macarena, Santa Justa, Provenir, Tiro de Linea - La Paz.
+
+* La clase 2 ocupa toda la Isla de la Cartuja, todo el entorno de La Palmera (Sur) y núcleos menores en Nervión, Macarena, Sevilla-Este, Alcosa-Torreblanca y Bellavista.
+
+* La clase 1 ocupa la periferia Norte y Este adentrándose hacia el centro sobre todo por el norte (Macarena, Alameda).
+
+* La clase 5 está en exclusiva en Parque Alcosa-Torreblanca y una estación en Bellavista. 
+
+Las zonas de Sevilla-Este, Parque Alcosa-Torreblanca (al Este), Bellavista (al Sur) y posiblemente también San Jerónimo (al Norte) están suficientemente distanciadas del resto como para generar dinámicas propias con patrones de centralidad distintos, lo que podría explicar la distribución de clases que se observan en las mismas.
+
+### Patrones espacio-temporales
+
+![% de Bicis disponibles por hora del día y día de la semana. Patrones por clase de estación.](img/PctBicisDisponibles_PatronesTemporales_por_ClaseEstacion.png)
+
+La distribución por día de la semana y hora del día del porcentaje de bicis disponibles entre las distintas clases de estaciones muestra:
+
+1) Los patrones para las clases 1 y 4 son claramente complementarios, correspondiendo la clase 1 a estaciones con concentración de bicicletas disponibles todos los días de noche y madrugada y la clase 4 a estaciones con máxima presencia de bicis disponibles entre las 9:00 y las 13:00 horas de Lunes a Viernes. Lo que se correspondería a desplazamientos entre residencia (1) y trabajo o estudio (4). 
+
+2) Los patrones para las clases 2 y 3 son igualmente complementarios y muy parecidos a los indicados para 4 y 1, respectivamente.
+
+3) La clase 5 presenta un comportamiento temporal bien distinto al de las otras clases, con máximos en las madrugadas de lunes y martes, niveles relativamente altos durante todo el fin de semana, y mínimos en la parte central del día de los días centrales de la semana (X,J,V).
+
+4) Las clases 2 y 4 aunque presentan patrones generales muy parecidos, según lo dicho, se diferencian sobre todo por su comportamiento los viernes y sábados a partir de las 20:00, con niveles altos en la clase 4, posiblemente inducida por desplazamientos a actividades de tipo lúdico. 
+
+5) La distinción entre los patrones 1 y 3 está vinculada al comportamiento en fin de semana relacionada con la extensión de niveles altos hasta horas más tardías en la clase 1.
+
+
+## Modelo predictivo
+
+### Persistencia de modelos
+
+Las tablas _modelos_, _betas_ y _residuos_ recogen la información derivada del ajuste, entrenamiento y testeo de los distintos modelos. Las cabeceras de dichas tablas dan cuenta del modo en que se ha organizado.
+
+
+      > head(modelos)
+        id  modelo vi   vj    lambda         a0 df        r2      RMSE    R2test
+      1  2 GLMNET0 b1 b179 0.2433850  0.5907011  4 0.9778934  5.190999 0.9682191
+      2  3 GLMNET1 b1 b179 0.5555811  1.2567319  5 0.9540914  7.321472 0.9368288
+      3  4 GLMNET2 b1 b179 1.3720174  2.9205337  4 0.9043455 10.114414 0.8804563
+      4  5 GLMNET3 b1 b179 1.7024080  5.6792678  7 0.6711944 18.023582 0.6169176
+      5  6 GLMNET4 b1 b179 2.5113937  9.7058241  6 0.4913999 21.980414 0.4312904
+      6  7 GLMNET5 b1 b179 1.8018208 12.4920250  9 0.3386743 25.230830 0.2498336
+
+      > head(betas)
+        id  modelo vi   vj  nom beta
+      1  2 GLMNET0 b1 b179 hora    0
+      2  2 GLMNET0 b1 b179  lun    0
+      3  2 GLMNET0 b1 b179  mar    0
+      4  2 GLMNET0 b1 b179  mie    0
+      5  2 GLMNET0 b1 b179  jue    0
+      6  2 GLMNET0 b1 b179  vie    0
+
+      > head(residuos)
+        id  modelo vi    residuo
+      1  2 GLMNET0 b1   3.602684
+      2  2 GLMNET0 b1  0.7217409
+      3  2 GLMNET0 b1 -0.7253595
+      4  2 GLMNET0 b1  -2.075419
+      5  2 GLMNET0 b1 -0.4769004
+      6  2 GLMNET0 b1  0.4898732
+ 
+
+
+Table: Campos en la estructura de persistencia de modelos
+
+Campo  | Descripción
+-------|-------------
+id     | Número de modelo
+modelo | Nombre del modelo GLMNET0..6 
+vi     | Identificador de estación objetivo
+vj     | Identificador de estación más cercana
+lambda | Parámetro ajustado equilibrio regularización L1 - L2
+a0     | Intersect del modelo
+df     | Número de coeficientes no nulos
+r2     | R cuadrado ajuste
+RMSE   | Raíz cuadrada del error cuadrático medio (test)
+R2test | R cuadrado (test)
+nom    | Identificador del regresor
+beta   | Coeficiente del regresor en el modelo
+residuo| Residuo (test): Y-predY
+
+
+### Bondad de ajuste de los modelos
+
+La tabla _modelos_ incorpora tres indicadores de la bondad de ajuste, uno referido a la etapa de entrenamiento (r2) y otros dos (RMSE y R2test) calculados en base al contraste de las predicciones con los valores reales en el conjunto test.
+
+En la tablas siguientes se muestran los indicadores señalados tanto para el conjunto de todos los modelos como por tipo de modelo.
+
+Table: Bondad de ajuste global de los modelos.
+
+| r2_median| R2test_median| RMSE_median| r2_mean| R2test_mean| RMSE_mean|
+|---------:|-------------:|-----------:|-------:|-----------:|---------:|
+|    0.7843|        0.6775|      15.511|  0.6482|      0.5486|   17.5913|
+
+
+Table: Bondad de ajuste por tipo de modelo.
+
+|modelo  | r2_median| R2test_median| RMSE_median| r2_mean| R2test_mean| RMSE_mean|
+|:-------|---------:|-------------:|-----------:|-------:|-----------:|---------:|
+|GLMNET0 |    0.9774|        0.9677|      5.1183|  0.9741|      0.9623|    5.0735|
+|GLMNET1 |    0.9546|        0.9320|      7.3979|  0.9490|      0.9234|    7.2812|
+|GLMNET2 |    0.9066|        0.8551|     10.7559|  0.8992|      0.8463|   10.4202|
+|GLMNET3 |    0.6584|        0.4512|     20.2921|  0.6613|      0.4976|   19.3752|
+|GLMNET4 |    0.4778|        0.2180|     24.7588|  0.5115|      0.3212|   23.1190|
+|GLMNET5 |    0.3419|        0.1132|     26.5877|  0.4090|      0.2304|   25.3272|
+|GLMNET6 |    0.0971|        0.0262|     31.2985|  0.1329|      0.0472|   32.5427|
+
+Los resultados muestran un buen ajuste para el conjunto de los modelos, con un R2test que para más de la mitad de ellos superan el 0.67. Pero más importante es que RMSE, raíz del error medio cuadrático, tiene un valor muy bajo, 17.59 en media y mediana de 15.51. Hay que tener en cuenta que RMSE se mide en las mismas unidades que la variable objetivo de predicción, en nuestro caso porcentaje de bicicletas disponibles.
+
+La bondad de los modelos por tipo es también bastante buena, si bien, como era esperable con un notable incremento del error a medida que se dispone de menor información para la predicción. En los modelos con disponibilidad de información muy reciente (15min), la bondad del ajuste, se dispara con R2 muy próximo a 1 y RMSE entorno a 5. Para un horizonte de predicción de 4h, RMSE se sitúa entorno a 20, con 24h en 26 y para horizontes más lejanos, el RMSE está entorno a 32.
+
+La figura siguiente muestra el progresivo incremento de RMSE a medida que se alarga el horizonte de predicción y han de utilizarse modelos con menor información reciente.
+
+![Bondad de ajuste. Raíz del error cuadrático medio (RMSE) por tipo de modelo.](img/RMSExTipoModelo.png)
+
+Para cada estación se han estimado siete modelos, la figura siguiente muestra para cada uno de ellos su error (RMSE).
+
+![Errores (RMSE) por estación y tipo de modelo](img/RMSExEstacionxTipoModelo.png)
+
+### Residuos
+
+La figura siguiente muestra la distribución de residuos por tipo de modelo.
+
+![Distribución de residuos por tipo de modelo.](img/DistribucionResiduosxTipoModelo.png)
+
+
+### Regresores significativos
+
+La importancia relativa de cada uno de los regresores en el conjunto de modelos estimados se muestra en la figura siguiente, en la que se representa el número de modelos en los que dicho regresor aparece como significativo, según tipo de modelo.
+
+![Frequencia de modelos con regresor significativo por tipo de modelo.](img/Regresores_sig_FreqModelos.png)
+
+
+Vemos que para cada uno de los tipos de modelo, los regresores de retardo propios (de la misma estación) más recientes disponibles son los que más importancia tienen, apareciendo en la totalidad de estaciones. Esto es cierto para horizontes de predicción de hasta 4h (GLMNET3). En el caso de un horizonte de 8h (GLMNET4), tiene más importancia el retardo propio de 24h que el mismo de 8h.
+
+El retardo propio de 24h tiene una gran importancia apareciendo en tercer lugar con 179 estaciones para modelos completos (GLMNET0).
+
+Los regresores de retardo de vecino más próximo (j) tienen una importancia más limitada, el orden de importancia de los mismos es: 15min,4h,24h,8h y 30min.
+
+La variable no retardada que aparece como más importante en conjunto es _hora_, alcanzando su máxima representación en los modelos con horizonte de 24h (GLMNET5), le siguen temperaturas; _tmin_, _tmax_.
+
+En los modelos sin variables retardadas (GLMNET6) el orden de importancia de las variables, en los términos aquí considerados, es el siguiente: tmax > hora > tmin > p > > fest > lun > fsof > ...
+
+  
+  
+
+Tras todo lo expuesto se puede concluir que el modelo predictivo desarrollado responde de forma satisfactoria a los objetivos planteados inicialmente y es una buena base para un desarrollo y despliegue más ambicioso que puede ser contrastado con usuarios potenciales y gestores.
+
+

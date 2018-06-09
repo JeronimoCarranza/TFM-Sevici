@@ -1,0 +1,726 @@
+---
+coding: utf-8
+lang: es
+title: | 
+  | Trabajo Fin de Máster: Smart Bike - Sevilla. 
+  | Anexo 2. Clasificación de estaciones y patrones espacio-temporales.
+subtitle: Máster en Data Science y Big Data - Universidad de Sevilla, 2016/2017.
+author: Jerónimo Carranza Carranza
+date: 1 de marzo de 2018
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_height: 3.8
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  html_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[LO,LE]{}
+- \fancyhead[RO,RE]{}
+- \fancyhead[CO,CE]{\thetitle}
+- \fancyfoot[LE,RO]{}
+- \fancyfoot[CE,CO]{\thepage}
+- \fancyfoot[RE,LO]{}
+- \renewcommand{\headrulewidth}{0.2pt}
+- \renewcommand{\footrulewidth}{0.2pt}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+---
+\listoftables
+\listoffigures
+\newpage
+
+```{r setup, include=FALSE}
+options(width=70)
+knitr::opts_chunk$set(comment = "##"
+                      , warning = FALSE
+                      , message = FALSE
+                      , echo = TRUE
+                      , tidy = TRUE
+                      , size="small"
+                      , cache = TRUE
+                      )
+```
+
+```{r cache=FALSE}
+library(RPostgreSQL)
+library(tidyverse)
+library(tidyr)
+library(dtplyr)
+library(dbplyr)
+library(knitr)
+library(sp)
+library(sf)
+library(ggplot2)
+library(ggcorrplot)
+library(ggspatial)
+library(lubridate)
+library(scales)
+library(factoextra)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(ggdendro)
+
+```
+
+```{r echo=FALSE, cache=FALSE}
+con = dbConnect(drv = dbDriver("PostgreSQL"), 
+                dbname='sevici', user='postgres')
+```
+
+```{r echo=FALSE, cache=FALSE}
+# Función general para facilitar respuesta rápida
+
+dbQueryIf = function(qname,conn,query){
+  if(!qname %in% dbListTables(conn))
+    dbSendStatement(conn, 
+      paste0('CREATE TABLE IF NOT EXISTS ', qname, ' AS ', query))
+  dbGetQuery(conn, paste0('SELECT * FROM ',qname,';'))
+}
+```
+
+```{r echo = FALSE}
+
+if (!"seviesta" %in% ls()){
+seviesta = dbGetQuery(con, 'SELECT * FROM seviesta;')
+}
+
+```
+
+```{r echo=FALSE}
+
+if (!"resumen_datos_por_estacion" %in% ls()){
+resumen_datos_por_estacion = 
+  dbQueryIf('resumen_datos_por_estacion',con,
+  'SELECT num, count(id) as N,
+    min(last_update) as desde, max(last_update) as hasta,
+    min(add_date) as pdesde, max(add_date) as phasta,
+    min(stands) as minst, max(stands) as maxst,
+    avg(stands) as avgst,
+    min(availablestands) as minavst,
+    max(availablestands) as maxavst,
+    avg(availablestands) as avgavst,
+    min(availablebikes) as minbikes,
+    max(availablebikes) as maxbikes,
+    avg(availablebikes) as avgbikes
+    FROM sevidata group by num order by num;'
+  )
+}
+```
+
+
+```{r echo = FALSE}
+
+if (!"sevidata_num_fecha_hora_dsem" %in% ls()){
+sevidata_num_fecha_hora_dsem = 
+  dbQueryIf("sevidata_num_fecha_hora_dsem", con, 
+    "SELECT num, date(add_date) as fecha, 
+    EXTRACT(HOUR FROM add_date) as hora,
+    EXTRACT(ISODOW FROM add_date) as dsem,
+    count(add_date) as np5min,
+    date(add_date) in (select fecha from festivos) as fest,
+    min(availablestands) as mins,
+    max(availablestands) as maxs,
+    avg(availablestands) as avgs,
+    stddev(availablestands) as stds,
+    min(availablebikes) as minb,
+    max(availablebikes) as maxb,
+    avg(availablebikes) as avgb,
+    stddev(availablebikes) as stdb
+    FROM sevidata WHERE ok = 1 or ok = 6
+    GROUP BY num, fecha, hora, dsem ORDER BY num, fecha, hora;"
+)}
+
+```
+
+
+```{r echo=FALSE}
+if (!"sevicip5m" %in% ls()){
+  sevicip5m = dbGetQuery(con,"select * from sevicip5m;")
+}
+```
+
+
+```{r}
+set.seed(12345)
+
+```
+
+
+# Análisis de correlación entre estaciones
+
+Para el análisis de correlación y posteriores partimos de _sevicip5m_, este dataframe tiene las 105132 filas correspondientes a los periodos de cinco minutos entre inicio y fin y las 522 columnas correspondientes a:
+
+Table: Estructura _sevicip5m_
+
+Variable | Descripción
+---------|-----------------
+p5min    | Periodo de 5min (Datetime)
+hueco    | Hueco global (Boolean)
+si       | Estacionamientos disponibles estación i  
+bi       | Bicicletas disponibles estación i
+:        |    para i en 1:260
+
+Se ha utilizado anteriormente _sevicip5m_ para el análisis de huecos, excluyendo los datos duplicados, pero no todos los casos no válidos, en particular, para _'ok in 3:5'_. Para anular dichos casos se implementa el siguiente procedimiento:
+
+```{r echo=TRUE, eval=TRUE}
+
+# Se dispone en una fila el máximo número de estacionamientos por estación
+seviesta_MaxS =  resumen_datos_por_estacion[,8]
+
+# Se extrean las columnas de estacionamientos y bicicletas disponibles
+# Se trasponen (=> a matriz) para permitir la comparación posterior:
+# el vector se compara con la matriz columna por columna
+sevicip5m_B = t(sevicip5m %>% select(starts_with('b'))) 
+sevicip5m_S = t(sevicip5m %>% select(starts_with('s')))
+
+# Se identifican los casos no válidos con -1 matriz auxiliar
+sevicip5mL = (sevicip5m_B + sevicip5m_S > seviesta_MaxS) * -1 
+
+# Se anulan los casos no válidos en matriz auxiliar
+sevicip5mL[sevicip5mL==-1] = NA
+
+# Se anulan en estacionamientos y bicicletas disponibles los casos no válidos
+# y se re-traspone
+sevicip5mS = t(sevicip5m_S + sevicip5mL)
+sevicip5mB = t(sevicip5m_B + sevicip5mL)
+
+# Se anteponen las columnas p5min y hueco
+sevicip5mBS <- bind_cols(sevicip5m[,1:2], 
+                         as.data.frame(sevicip5mB), as.data.frame(sevicip5mS))
+# Se ordena temporalmente
+sevicip5mBS <- sevicip5mBS %>% arrange(p5min)
+
+# Limpia
+rm(sevicip5m_B)
+rm(sevicip5m_S)
+rm(sevicip5mL)
+rm(sevicip5mB)
+rm(sevicip5mS)
+
+```
+
+
+```{r}
+load('sevicip5mBS.RData')
+```
+
+Seguidamente una muestra de los datos de bicicletas disponibles en _sevicip5mBS_
+
+```{r}
+kable(sevicip5mBS[,c(1:10,261,262,521,522)] %>% sample_n(10), 
+      caption = 'Muestra de datos de bicicletas disponibles _sevicip5mBS_.')
+
+```
+
+
+Calculamos la matriz de correlación (Pearson) entre estaciones para la variable número de bicicletas disponibles. 
+
+```{r}
+sevici_bcorr = cor(select(sevicip5mBS,starts_with('b')), use = 'pairwise')
+```
+
+
+La matriz de correlación obtenida la segregamos en un dataframe con todos los pares y el valor de correlación para su tratamiento posterior como grafo (con nodos geoposicionados). 
+
+```{r}
+sevici_bcorr_melted = tbl_df(melt(sevici_bcorr))
+sevici_bcorr_melted <- mutate(sevici_bcorr_melted, 
+       from = as.integer(substr(Var1,2,5)),
+       to = as.integer(substr(Var2,2,5))) 
+sevici_bcorr_melted <- sevici_bcorr_melted[,c(4,5,3,1,2)]
+```
+
+```{r}
+sevici_bcorr_melted <- sevici_bcorr_melted %>% rename(corr = value)
+sevici_bcorr_melted
+```
+
+
+```{r fig.cap='Datos válidos estaciones. Matriz de correlación (|corr|>0.5) entre estaciones.'}
+sevici_bcorr_melted %>% filter(abs(corr)>0.5) %>% 
+  ggplot(aes(x=from, y=to, fill=corr)) + 
+  scale_fill_gradientn(colors = rainbow(6)) +
+    geom_tile()
+```
+
+
+```{r}
+g <- sevici_bcorr_melted %>% filter(abs(corr)>0.5) %>% filter(to > from) %>%
+  graph_from_data_frame(directed=FALSE, vertices = seviesta)
+```
+
+
+```{r}
+g$layout = cbind(V(g)$longitude,V(g)$latitude)
+```
+
+
+```{r fig.cap='Datos válidos estaciones. Grafo espacial de correlaciones |corr|> 0.5.', fig.width=7, fig.height=9}
+
+ggraph(g, fullpage = TRUE) + 
+  geom_osm(type = 'cartolight', quiet = TRUE) +
+  geom_node_point(color='black', size=0.5, alpha=0.5) +
+  geom_edge_arc(aes(color = corr), edge_alpha = 0.6, curvature = 0.2) +
+  scale_edge_color_gradient2(low="red",high="blue",mid="white",midpoint=0) +
+  labs(x="",y="") + coord_map() + theme_bw()
+
+```
+
+
+```{r}
+sumcorrp <- sevici_bcorr_melted %>% filter(corr>0.5) %>% filter(corr<1) %>% 
+  group_by(from) %>% summarise(sump = sum(corr)) %>% select(num = from, sump) %>%
+  inner_join(seviesta, by = 'num')
+
+sumcorrn <- sevici_bcorr_melted %>% filter(corr < -0.5) %>% 
+  group_by(from) %>% summarise(sumn = sum(corr)) %>% select(num = from, sumn) %>%
+  inner_join(seviesta, by = 'num')
+
+```
+
+
+```{r fig.cap='Datos válidos estaciones. Suma de correlaciones positivas por estación  (corr>0.5).', fig.width=7, fig.height=9}
+
+ggraph(g, fullpage = TRUE) + 
+  geom_osm(type = 'cartolight', quiet = TRUE) +
+  geom_node_point(color='black', size=0.5, alpha=0.5) +
+  geom_edge_arc(aes(color = corr), edge_alpha = 0.3, curvature = 0.2) +
+  scale_edge_color_gradient2(low="red",high="blue",mid="white",midpoint=0) +
+  geom_point(data=sumcorrp, aes(longitude, latitude, color=sump), 
+             size=2.5, alpha=0.5) + 
+  scale_color_gradientn(colours=c('green','cyan','blue')) +
+  labs(x="",y="") + coord_map() + theme_bw()
+
+```
+
+
+```{r fig.cap='Datos válidos estaciones. Suma de correlaciones negativas por estación (corr<-0.5).', fig.width=7, fig.height=9}
+
+ggraph(g, fullpage = TRUE) + 
+  geom_osm(type = 'cartolight', quiet = TRUE) +
+  geom_node_point(color='black', size=0.5, alpha=0.5) +
+  geom_edge_arc(aes(color = corr), edge_alpha = 0.3, curvature = 0.2) +
+  scale_edge_color_gradient2(low="red",high="blue",mid="white",midpoint=0) +
+  geom_point(data=sumcorrn, aes(longitude, latitude, color=sumn), 
+             size=2.5, alpha=0.4) + 
+  scale_color_gradientn(colours=c('red','orange','green')) +
+  labs(x="",y="") + coord_map() + theme_bw()
+
+```
+
+# Clasificación de las estaciones
+
+Utilizamos la matriz de correlación como base para la clasificación de las estaciones.
+Para ello en primer lugar convertimos los coeficientes de correlación en disimilaridades y éstas son tratadas como distancias.
+
+```{r}
+bdisim_01 = 1 - sevici_bcorr
+bdist_01 = as.dist(bdisim_01)
+```
+
+Probamos los métodos de agregación disponibles en _hclus_ mostrando sus resultados en forma de dendrograma y su expresión espacial para la segmentación en 5 clases.
+
+
+```{r fig.cap='Datos válidos estaciones. Dendrograma y clasificación de estaciones según distintos métodos de aglomeración.'}
+
+metodos.hclust = c("ward.D", "ward.D2", "single", "complete", "average",
+            "mcquitty","median","centroid") 
+
+for (m in metodos.hclust){
+  clus = hclust(bdist_01, method = m)
+  plot(clus, main=paste0("Metodo ",m))
+  rect.hclust(clus,k=5)
+  clus_class = tbl_df(cutree(clus, k = 5))
+  clus_class <- seviesta %>% arrange(num) %>% bind_cols(clus_class)
+  
+  pltclas = ggraph(g, fullpage = TRUE) + 
+    geom_osm(type = 'cartolight', quiet = TRUE) +
+    geom_node_point(color='black', size=0.5, alpha=0.5) +
+    geom_point(data=clus_class, aes(longitude, latitude, 
+                                       color=as.factor(value)), 
+               size=3, alpha=0.6) + 
+    scale_color_manual(name = 'Clase',
+                       values = c('blue'
+                                  ,'cyan'
+                                  ,'green' 
+                                  #,'dark green'
+                                  #,'yellow'
+                                  ,'orange'
+                                  ,'red'
+                                  ,'brown'
+                                  ,'black'
+                                  )) +
+    labs(x="",y="") + coord_map() + theme_bw()
+  print(pltclas)
+
+}
+
+```
+
+
+Seleccionamos el método 'complete' que tanto en dendrograma como espacialmente presenta buen aspecto y es espacialmente más coherente.
+
+```{r}
+clus_01 = hclust(bdist_01, method = metodos.hclust[4])
+```
+
+```{r}
+dclus_01 = dendro_data(clus_01, type="rectangle") 
+```
+
+```{r fig.cap='Datos válidos estaciones. Dendrograma de estaciones basado en correlación.', fig.width=7, fig.height=9}
+
+ggplot() + 
+  geom_segment(data=segment(dclus_01), 
+               aes(x=x, y=y, xend=xend, yend=yend), size = 0.2) + 
+  geom_text(data=label(dclus_01), aes(x=x, y=y, label=label, hjust=2), size=1.5) +
+  geom_hline(aes(yintercept=1.30), color='red', size = 0.2) +
+  coord_flip() + labs(x="",y="") +
+  theme(axis.line.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        panel.background=element_rect(fill="white"),
+        panel.grid=element_blank())
+
+```
+
+```{r}
+clus_01_class = tbl_df(cutree(clus_01, k = 5))
+clus_01_class <- seviesta %>% arrange(num) %>% bind_cols(clus_01_class)
+# clus_01_class = bind_cols(clus_01_class, seviesta)
+```
+
+
+```{r fig.cap='Datos válidos estaciones. Clasificación de estaciones.', fig.width=7, fig.height=9}
+
+ggraph(g, fullpage = TRUE) + 
+  geom_osm(type = 'cartolight', quiet = TRUE) +
+  geom_node_point(color='black', size=0.5, alpha=0.5) +
+  geom_point(data=clus_01_class, aes(longitude, latitude, 
+                                     color=as.factor(value)), 
+             size=3, alpha=0.6) + 
+  scale_color_manual(name = 'Clase',
+                     values = c('blue'
+                                ,'cyan'
+                                ,'green' 
+                                #,'dark green'
+                                #,'yellow'
+                                ,'orange'
+                                ,'red'
+                                ,'brown'
+                                ,'black'
+                                )) +
+  labs(x="",y="") + coord_map() + theme_bw()
+
+```
+
+Puede apreciarse una distribución espacial de las cinco clases identificadas muy concentrada o compacta, esto es, sería posible establecer una zonificación con un número de zonas casi homogéneas relativamente bajo (entre los vecinos de cada estación son en general mayoría los de su misma clase). Se aprecia así mismo una disposición con cierto carácter concéntrico para las clases. 
+
+* La clase 4 ocupa una posición central extendiéndose por parte del casco histórico de la ciudad, los barrios de Nervión, Los Remedios, Felipe II.
+
+* La clase 3 ocupa la primera corona entorno a la clase 4, en Triana, centro Norte - Macarena, Santa Justa, Provenir, Tiro de Linea - La Paz.
+
+* La clase 2 ocupa toda la Isla de la Cartuja, todo el entorno de La Palmera (Sur) y núcleos menores en Nervión, Macarena, Alcosa-Torreblaca y Bellavista.
+
+* La clase 1 ocupa la periferia Norte y Este adentrándose hacia el centro sobre todo por el norte (Macarena, Alameda).
+
+* La clase 5 está en exclusiva en Parque Alcosa-Torreblanca y una estación en Bellavista. 
+
+Las zonas de Parque Alcosa-Torreblanca (al Este), Bellavista (al Sur) y posiblemente también San Jerónimo (al Norte) están suficientemente distanciadas del resto como para generar dinámicas propias con patrones de centralidad distintos, lo que podría explicar la distribución de clases que se observan en las mismas.
+
+
+# Patrones espacio-temporales
+
+```{r}
+
+resumen_por_estacion_dsem_hora =
+  dbQueryIf('resumen_por_estacion_dsem_hora', con,
+  'SELECT EXTRACT(ISODOW FROM add_date) as dsem,
+        EXTRACT(HOUR FROM add_date) as hora,
+        num,
+        count(*) as n,
+        avg(availablestands) as avgs,
+        avg(availablebikes) as avgb,
+        stddev(availablestands) as stds,
+        stddev(availablebikes) as stdb,
+        min(availablestands) as mins,
+        min(availablebikes) as minb,
+        max(availablestands) as maxs,
+        max(availablebikes) as maxb
+  FROM sevidata WHERE ok = 1 or ok = 6 GROUP BY dsem, hora, num;'
+  )
+
+```
+
+```{r}
+resumen_por_estacion_dsem_hora$dsem = factor(resumen_por_estacion_dsem_hora$dsem, 
+       labels = c('L','M','X','J','V','S','D'))
+
+```
+
+```{r}
+resumen_por_estacion_dsem_hora = tbl_df(
+  resumen_por_estacion_dsem_hora %>% 
+    inner_join(clus_01_class, by = c('num' = 'num')))
+
+```
+
+```{r}
+resumen_clase_dsem_hora = resumen_por_estacion_dsem_hora %>% 
+  group_by(dsem, hora, value) %>% 
+  summarise(meanb = mean(avgb), minb=min(avgb), maxb=max(avgb), sdb=sd(avgb),
+            means = mean(avgs), mins=min(avgs), maxs=max(avgs), sda=sd(avgs))
+
+resumen_clase_dsem_hora <- resumen_clase_dsem_hora %>% 
+  mutate(pctb = 100*meanb/(meanb + means))
+
+resumen_clase_dsem_hora <- resumen_clase_dsem_hora %>% 
+  mutate(pctCVb = 100*sdb/meanb)
+
+```
+
+
+```{r fig.cap='Datos estaciones. %Bicis disponibles por clase de estación, hora del día y día de la semana.', fig.width=7, fig.height=8.5}
+
+ggplot(resumen_clase_dsem_hora)+
+    geom_tile(aes(y=as.factor(hora), x=as.factor(dsem), 
+                  fill=pctb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    # scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(x="Día de la semana", y="Hora del día") +
+    facet_grid(~ value) + 
+    theme(legend.position = 'bottom')
+```
+
+
+
+```{r fig.width=7, fig.height=1.6}
+
+for (i in 1:4) {
+  pltfill = ggplot(resumen_clase_dsem_hora %>% filter(value == i))+
+    geom_tile(aes(x=as.factor(hora), y=as.factor(dsem), fill=pctb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    labs(y="Día de la semana", x="Hora del día",
+         subtitle=paste('Clase ',i))
+  print(pltfill)
+}
+
+```
+
+
+```{r fig.cap='Datos estaciones. %Bicis disponibles por hora del día y día de la semana. Patrones por clase de estación.', fig.width=7, fig.height=1.6}
+
+ggplot(resumen_clase_dsem_hora %>% filter(value == 5))+
+    geom_tile(aes(x=as.factor(hora), y=as.factor(dsem), fill=pctb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    labs(y="Día de la semana", x="Hora del día",
+         subtitle=paste('Clase ',5))
+
+```
+
+La distribución por día de la semana y hora del día del porcentaje de bicis disponibles entre las distintas clases de estaciones muestra:
+
+1) Los patrones para las clases 1 y 4 son claramente complementarios, correspondiendo la clase 1 a estaciones con concentración de bicicletas disponibles todos los días de noche y madrugada y la clase 4 a estaciones con máxima presencia de bicis disponibles entre las 9:00 y las 13:00 horas de Lunes a Viernes. Lo que se correspondería a desplazamientos entre residencia (1) y trabajo o estudio (4). 
+
+2) Los patrones para las clases 2 y 3 son igualmente complementarios y muy parecidos a los indicados para 4 y 1, respectivamente.
+
+3) La clase 5 presenta un comportamiento temporal bien distinto al de las otras clases, con máximos en las madrugadas de lunes y martes, niveles relativamente altos durante todo el fin de semana, y mínimos en la parte central del día de los días centrales de la semana (X,J,V).
+
+4) Las clases 2 y 4 aunque presentan patrones generales muy parecidos, según lo dicho, se diferencian sobre todo por su comportamiento los viernes y sábados a partir de las 20:00, con niveles altos en la clase 4, posiblemente inducida por desplazamientos a actividades de tipo lúdico. 
+
+5) La distinción entre los patrones 1 y 3 está vinculada al comportamiento en fin de semana relacionada con la extensión de niveles altos hasta horas más tardías en la clase 1.
+
+
+
+La variabilidad interna dentro de las clases puede apreciarse mediante el coeficiente de variación. Se muestra seguidamente expresada en %.
+
+
+```{r fig.cap='Datos estaciones. Bicis disponibles por clase de estación, hora del día y día de la semana. Coeficiente de Variación (%).', fig.width=7, fig.height=9}
+
+ggplot(resumen_clase_dsem_hora)+
+    geom_tile(aes(y=as.factor(hora), x=as.factor(dsem), 
+                  fill=pctCVb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    # scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(x="Día de la semana", y="Hora del día") +
+    facet_grid(~ value) + 
+    theme(legend.position = 'bottom')
+```
+
+
+```{r fig.width=7, fig.height=1.6}
+
+for (i in 1:4) {
+  pltfill = ggplot(resumen_clase_dsem_hora %>% filter(value == i))+
+    geom_tile(aes(x=as.factor(hora), y=as.factor(dsem), fill=pctCVb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    labs(y="Día de la semana", x="Hora del día",
+         subtitle=paste('Clase ',i))
+  print(pltfill)
+}
+
+```
+
+
+```{r fig.cap='Datos estaciones. Bicis disponibles por hora del día y día de la semana. Patrones por clase de estación. Coeficiente de Variación (%).', fig.width=7, fig.height=1.6}
+
+ggplot(resumen_clase_dsem_hora %>% filter(value == 5))+
+    geom_tile(aes(x=as.factor(hora), y=as.factor(dsem), fill=pctCVb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    labs(y="Día de la semana", x="Hora del día",
+         subtitle=paste('Clase ',5))
+
+```
+
+
+Se presenta seguidamente el comportamiento individual de una muestra de estaciones en cada una de las clases identificadas.
+
+```{r}
+set.seed(123)
+sample_stations_class <- clus_01_class %>% 
+  group_by(value) %>% sample_n(5) %>% arrange(value, num)
+
+#dim(sample_stations_class)
+#head(sample_stations_class)
+
+resumen_por_estacion_dsem_hora <- resumen_por_estacion_dsem_hora %>% 
+  mutate(pctb = 100*avgb/(avgb + avgs))
+
+```
+
+
+```{r fig.width=7, fig.height=4}
+
+for (k in 1:5){
+  pltfillmu = ggplot(resumen_por_estacion_dsem_hora %>%
+                       semi_join(sample_stations_class, by='num') %>% 
+                       filter(value == k)) +
+    geom_tile(aes(y=as.factor(hora), x=as.factor(dsem), fill=pctb)) +
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    labs(x="Día de la semana", y="Hora del día",
+       subtitle=paste('Clase: ',k)) +
+    facet_grid(~ num) + 
+    theme(legend.position = 'bottom')
+  print(pltfillmu)
+}
+```
+
+```{r fig.cap='Datos estaciones. %Bicis disponibles por hora del día y día de la semana. Muestra de estaciones por clase.', fig.width=7, fig.height=0.1}
+ggplot()
+```
+
+Con objeto de contrastar la validez de los patrones espacio-temporales observados construimos un modelo con las variables independientes clase de estación, día de la semana y hora del día y variable dependiente el número de bicicletas disponibles.
+
+Los datos para construir el modelo no son los datos completamente desagregados sino que se utilizan las medias del número de bicicletas disponibles por estación, fecha y hora. Este conjunto de datos tiene más de 2 millones de registros.
+
+```{r}
+data_glm = sevidata_num_fecha_hora_dsem %>% inner_join(clus_01_class, by='num') %>%
+  mutate(pctb=avgb/(avgb+avgs)*100) %>%  
+  select(one_of('pctb','value','dsem','hora')) %>% rename(cls = value) %>% 
+  filter(pctb>=0)
+
+summary(data_glm)  
+```
+
+```{r}
+data_glm$cls = factor(data_glm$cls)
+data_glm$dsem = factor(data_glm$dsem)
+#data_glm$hora = factor(data_glm$hora)
+
+summary(data_glm)  
+```
+
+```{r eval=FALSE}
+mod_glm = glm(pctb ~ ., data = data_glm)
+```
+
+```{r eval=FALSE}
+summary(mod_glm)
+```
+
+
+    Call:
+    glm(formula = pctb ~ ., data = data_glm)
+    
+    Deviance Residuals: 
+        Min       1Q   Median       3Q      Max  
+    -59.961  -28.289   -6.174   27.173   72.344  
+    
+    Coefficients:
+                 Estimate Std. Error  t value Pr(>|t|)    
+    (Intercept)  41.59419    0.12184  341.396  < 2e-16 ***
+    cls2        -11.04681    0.08421 -131.190  < 2e-16 ***
+    cls3          5.04646    0.05738   87.954  < 2e-16 ***
+    cls4         -1.83015    0.05618  -32.575  < 2e-16 ***
+    cls5         16.17585    0.08258  195.876  < 2e-16 ***
+    dsem2         0.22705    0.08029    2.828 0.004685 ** 
+    dsem3         0.19638    0.08020    2.449 0.014338 *  
+    dsem4         0.29428    0.08051    3.655 0.000257 ***
+    dsem5         0.57196    0.08072    7.085 1.39e-12 ***
+    dsem6         1.16314    0.08060   14.432  < 2e-16 ***
+    dsem7         0.97045    0.08068   12.029  < 2e-16 ***
+    hora1         0.38757    0.14839    2.612 0.009003 ** 
+    hora2         0.68545    0.14848    4.616 3.91e-06 ***
+    hora3         0.86640    0.14839    5.839 5.26e-09 ***
+    hora4         0.97805    0.14844    6.589 4.43e-11 ***
+    hora5         1.02817    0.14844    6.926 4.32e-12 ***
+    hora6         0.98977    0.14844    6.668 2.60e-11 ***
+    hora7         0.12919    0.14844    0.870 0.384115    
+    hora8        -1.34364    0.14838   -9.055  < 2e-16 ***
+    hora9        -1.65884    0.14849  -11.172  < 2e-16 ***
+    hora10       -1.78680    0.14845  -12.036  < 2e-16 ***
+    hora11       -2.12190    0.14845  -14.294  < 2e-16 ***
+    hora12       -2.36827    0.14855  -15.942  < 2e-16 ***
+    hora13       -2.53617    0.14854  -17.074  < 2e-16 ***
+    hora14       -2.89099    0.14843  -19.477  < 2e-16 ***
+    hora15       -2.20202    0.14864  -14.815  < 2e-16 ***
+    hora16       -1.51862    0.14858  -10.221  < 2e-16 ***
+    hora17       -1.75505    0.14841  -11.826  < 2e-16 ***
+    hora18       -1.97019    0.14835  -13.281  < 2e-16 ***
+    hora19       -2.08439    0.14839  -14.047  < 2e-16 ***
+    hora20       -2.03999    0.14849  -13.738  < 2e-16 ***
+    hora21       -1.42718    0.14849   -9.611  < 2e-16 ***
+    hora22       -0.58673    0.14849   -3.951 7.77e-05 ***
+    hora23       -0.08916    0.14849   -0.600 0.548195    
+    ---
+    Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+    
+    (Dispersion parameter for gaussian family taken to be 1014.714)
+    
+        Null deviance: 2330727744  on 2210585  degrees of freedom
+    Residual deviance: 2243078554  on 2210552  degrees of freedom
+    AIC: 21575884
+    
+    Number of Fisher Scoring iterations: 2
+
+
+Salvo hora23 y hora7, todos los niveles de los factores considerados son altamente significativos.
+
+Veamos ahora interacciones sobre una muestra.
+
+```{r eval=TRUE}
+sampledata_glm = data_glm %>% sample_n(500000)
+```
+
+
+```{r eval=TRUE}
+mod2_glm = glm(pctb ~ cls*dsem*hora, data = sampledata_glm)
+```
+
+```{r eval=TRUE}
+summary(mod2_glm)
+```
+

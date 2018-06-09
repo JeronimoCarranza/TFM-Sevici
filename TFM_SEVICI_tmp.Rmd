@@ -1,0 +1,344 @@
+---
+coding: utf-8
+lang: es
+title: | 
+  | Trabajo Fin de Máster: Smart Bike - Sevilla. 
+  | Pruebas, etc.
+subtitle: Máster en Data Science y Big Data - Universidad de Sevilla, 2016/2017.
+author: Jerónimo Carranza Carranza
+date: 20 de febrero de 2018
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_height: 3.8
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  html_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[LO,LE]{}
+- \fancyhead[RO,RE]{}
+- \fancyhead[CO,CE]{\thetitle}
+- \fancyfoot[LE,RO]{}
+- \fancyfoot[CE,CO]{\thepage}
+- \fancyfoot[RE,LO]{}
+- \renewcommand{\headrulewidth}{0.2pt}
+- \renewcommand{\footrulewidth}{0.2pt}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+---
+\listoftables
+\listoffigures
+\newpage
+
+```{r setup, include=FALSE}
+# options(width=70)
+knitr::opts_chunk$set(comment = "##"
+                      , warning = TRUE
+                      , message = FALSE
+                      , echo = FALSE
+                      , tidy = TRUE
+                      , size="small"
+                      , cache = TRUE
+                      )
+```
+
+```{r cache=FALSE}
+library(RPostgreSQL)
+library(tidyverse)
+library(tidyr)
+library(dtplyr)
+library(dbplyr)
+library(knitr)
+library(dplyr)
+library(sp)
+library(sf)
+library(ggplot2)
+library(ggcorrplot)
+library(ggspatial)
+library(lubridate)
+library(scales)
+library(factoextra)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(ggdendro)
+
+library(geosphere)
+
+```
+
+
+```{r echo=FALSE, cache=FALSE}
+con = dbConnect(drv = dbDriver("PostgreSQL"), 
+                dbname='sevici', user='postgres')
+```
+
+```{r echo=FALSE, cache=FALSE}
+# Función general para facilitar respuesta rápida
+
+dbQueryIf = function(qname,conn,query){
+  if(!qname %in% dbListTables(conn))
+    dbSendStatement(conn, 
+      paste0('CREATE TABLE IF NOT EXISTS ', qname, ' AS ', query))
+  dbGetQuery(conn, paste0('SELECT * FROM ',qname,';'))
+}
+```
+
+```{r echo = FALSE}
+
+if (!"seviesta" %in% ls()){
+  seviesta = dbGetQuery(con, 'SELECT * FROM seviesta;')
+}
+
+```
+
+
+```{r echo = FALSE}
+
+if (!"festivos" %in% ls()){
+  festivos = dbGetQuery(con, 'SELECT * FROM festivos;')
+}
+
+```
+
+
+```{r}
+set.seed(12345)
+
+```
+
+
+```{r eval=FALSE}
+# Ojo 8 horas estimadas 
+
+for (i in 1:2){
+  m = resumen_datos_por_estacion[i,8]
+  AnulaB = paste0("UPDATE sevicip5m SET b", i,
+                 "=NULL WHERE (s", i, " + b", i, ">", m,");")
+  dbSendStatement(con, AnulaB)
+  print(now())
+}
+
+```
+
+
+```{r}
+
+if (!"sevicip5mBS" %in% ls()){
+  # Se dispone en una fila el máximo número de estacionamientos por estación
+  seviesta_MaxS =  resumen_datos_por_estacion[,8]
+  
+  # Se extrean las columnas de estacionamientos y bicicletas disponibles
+  # Se trasponen (=> a matriz) para permitir la comparación posterior:
+  # el vector se compara con la matriz columna por columna
+  sevicip5m_B = t(sevicip5m %>% select(starts_with('b'))) 
+  sevicip5m_S = t(sevicip5m %>% select(starts_with('s')))
+  
+  # Se identifican los casos no válidos con -1 matriz auxiliar
+  sevicip5mL = (sevicip5m_B + sevicip5m_S > seviesta_MaxS) * -1 
+  
+  # Se anulan los casos no válidos en matriz auxiliar
+  sevicip5mL[sevicip5mL==-1] = NA
+  
+  # Se anulan en estacionamientos y bicicletas disponibles los casos no válidos
+  # y se re-traspone
+  sevicip5mS = t(sevicip5m_S + sevicip5mL)
+  sevicip5mB = t(sevicip5m_B + sevicip5mL)
+  
+  # Se anteponen las columnas p5min y hueco
+  sevicip5mBS <- bind_cols(sevicip5m[,1:2], 
+                           as.data.frame(sevicip5mB), as.data.frame(sevicip5mS))
+  sevicip5mBS <- sevicip5mBS %>% arrange(p5min)
+  
+  # Se ordena temporalmente
+  sevicip5mBS <- sevicip5mBS %>% arrange(p5min)
+
+  # Limpia
+  rm(sevicip5m_B)
+  rm(sevicip5m_S)
+  rm(sevicip5mL)
+  rm(sevicip5mB)
+  rm(sevicip5mS)
+  
+}
+```
+
+```{r eval=FALSE}
+sevicip5mB <- sevicip5mBS %>% select(starts_with('b'))
+sevicip5mS <- sevicip5mBS %>% select(starts_with('s'))
+sevicip5mBp <- round(sevicip5mB / (sevicip5mB + sevicip5mS) * 100, 1)
+
+```
+
+Se elimina la variable b109, que como ya se vio corresponde a una estación que sólo tiene datos en los tres primeros meses. Hacemos copia antes, _0
+
+```{r}
+sevicip5mBp_0 = sevicip5mBp
+sevicip5mBp = sevicip5mBp[,c(1:108,110:260)]
+
+```
+
+Los datos faltantes pueden dar problemas a la hora de construir modelos. Veamos el número de casos completos de que disponemos.
+
+```{r}
+
+sevicip5mBp_co = sevicip5mBp %>% mutate(co = complete.cases(sevicip5mBp)) %>%
+   filter(co==TRUE) %>% select(-co)
+dim(sevicip5mBp_co)
+```
+
+Hay 66032 casos completos una vez exluida la estación 109.
+Finalmente nos quedaremos sólo con los casos completos pero antes de desprendernos de la secuencia de tiempo con la que ahora están ordenados los datos, vamos a calcular variables con retardo
+
+```{r eval=TRUE}
+
+BpL15m <- sevicip5mBp %>% mutate_all(funs(lag(.,n=3))) %>%
+  setNames(paste0('l15m',names(.)))
+BpL30m <- sevicip5mBp %>% mutate_all(funs(lag(.,n=6))) %>%
+  setNames(paste0('l30m',names(.)))
+BpL1h <- sevicip5mBp %>% mutate_all(funs(lag(.,n=12))) %>% 
+  setNames(paste0('l1h',names(.)))
+BpL4h <- sevicip5mBp %>% mutate_all(funs(lag(.,n=48))) %>% 
+  setNames(paste0('l4h',names(.)))
+BpL8h <- sevicip5mBp %>% mutate_all(funs(lag(.,n=96))) %>% 
+  setNames(paste0('l8h',names(.)))
+BpL24h <- sevicip5mBp %>% mutate_all(funs(lag(.,n=192))) %>%
+  setNames(paste0('l24h',names(.)))
+
+```
+
+```{r}
+start = as.POSIXct('2015-12-01 00:00:00',tz='ES')
+end = as.POSIXct('2016-11-30 00:55:00',tz='ES')
+TSp5min = as.data.frame(seq.POSIXt(start,end,300))
+names(TSp5min) = c('p5min')
+
+head(TSp5min)
+```
+
+
+```{r eval=TRUE}
+BpDT = bind_cols(TSp5min, as.data.frame(sevicip5mBS$hueco))
+colnames(BpDT) = c('p5min','hueco')
+
+BpDT$fecha = as.Date(BpDT$p5min)
+BpDT$horam = hour(BpDT$p5min) + minute(BpDT$p5min)/60
+BpDT$hora = hour(BpDT$p5min)
+BpDT$minut = minute(BpDT$p5min)
+BpDT$mes = format(BpDT$fecha, "%m")
+BpDT$dsem = format(BpDT$fecha,"%a")
+BpDT$dsemn = wday(BpDT$fecha)
+
+BpDT$lun = ifelse(BpDT$dsem == 'lun', 1, 0)
+BpDT$mar = ifelse(BpDT$dsem == 'mar', 1, 0)
+BpDT$mie = ifelse(BpDT$dsem == 'mié', 1, 0)
+BpDT$jue = ifelse(BpDT$dsem == 'jue', 1, 0)
+BpDT$vie = ifelse(BpDT$dsem == 'vie', 1, 0)
+BpDT$sab = ifelse(BpDT$dsem == 'sáb', 1, 0)
+BpDT$dom = ifelse(BpDT$dsem == 'dom', 1, 0)
+
+```
+
+```{r eval=TRUE}
+BpDT$festivo = (BpDT$fecha %in% festivos$fecha)
+BpDT$fest = ifelse(BpDT$festivo == TRUE, 1, 0)
+
+```
+
+```{r eval=TRUE}
+BpDT <- BpDT %>% left_join(meteo, by='fecha')
+
+```
+
+```{r eval=TRUE}
+
+Bp = bind_cols(BpDT,
+          as.data.frame(sevicip5mBp), as.data.frame(BpL15m), 
+          as.data.frame(BpL30m), as.data.frame(BpL1h),
+          as.data.frame(BpL4h), as.data.frame(BpL8h), 
+          as.data.frame(BpL24h) 
+)
+
+```
+
+```{r}
+rm(BpL15m)
+rm(BpL30m)
+rm(BpL1h)
+rm(BpL4h)
+rm(BpL8h)
+rm(BpL24h)
+
+```
+
+Comprobamos casos completos en Bp:
+
+```{r}
+Bp_co = Bp %>% mutate(co = complete.cases(Bp)) %>%
+   filter(co==TRUE) %>% select(-co)
+dim(Bp_co)
+
+```
+
+Hay 52543 casos completos en Bp, esto es, aproximadamente el 50% de la secuencia temporal entre inicio y fin.
+Vamos considerar a efectos de modelado sólo los casos completos.
+
+```{r}
+save(Bp_co,file="Bp_co.RData")
+
+```
+
+
+```{r cache=FALSE}
+
+seviesta_dist = data.frame(num=0,tonum=0,dist=0)
+
+for (s in 1:260){
+  for (p in 1:260){
+    if (p!=s) {
+      lon1 = seviesta[seviesta$num==s,]$longitude
+      lat1 = seviesta[seviesta$num==s,]$latitude
+      lon2 = seviesta[seviesta$num==p,]$longitude
+      lat2 = seviesta[seviesta$num==p,]$latitude
+      d = round(distm(c(lon1, lat1), c(lon2, lat2), fun = distHaversine),0)
+      seviesta_dist[nrow(seviesta_dist)+1,] = c(s,p,d[1])
+    }
+  }
+}
+seviesta_dist <- seviesta_dist[seviesta_dist$num>0,]
+
+```
+
+```{r}
+seviesta_nearest = seviesta_dist %>% arrange(num, dist) %>% 
+  group_by(num) %>% summarise_all(funs(first))
+```
+
+
+
+
+
+```{r eval=false}
+Bp_co_gathered = Bp_co %>% select(1:281) %>%
+  gather('num','bp',22:281)
+```
+
+```{r eval=false}
+save(Bp_co_gathered,file='Bp_co_gathered.RData')
+```
+
+```{r eval=false}
+load(file='Bp_co_gathered.RData')
+```
+
+

@@ -1,0 +1,1525 @@
+---
+coding: utf-8
+lang: es
+title: | 
+  | Trabajo Fin de Máster: Smart Bike - Sevilla. 
+  | Anexo 1. Análisis exploratorio.
+subtitle: Máster en Data Science y Big Data - Universidad de Sevilla, 2016/2017.
+author: Jerónimo Carranza Carranza
+date: 1 de marzo de 2017
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_height: 3.8
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+  html_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 7
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhead[LO,LE]{}
+- \fancyhead[RO,RE]{}
+- \fancyhead[CO,CE]{\thetitle}
+- \fancyfoot[LE,RO]{}
+- \fancyfoot[CE,CO]{\thepage}
+- \fancyfoot[RE,LO]{}
+- \renewcommand{\headrulewidth}{0.2pt}
+- \renewcommand{\footrulewidth}{0.2pt}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+---
+\listoftables
+\listoffigures
+\newpage
+
+```{r setup, include=FALSE}
+options(width=70)
+knitr::opts_chunk$set(comment = "##"
+                      , warning = FALSE
+                      , message = FALSE
+                      , echo=TRUE
+                      , tidy = TRUE
+                      , size="small"
+                      , cache = TRUE
+                      )
+```
+
+```{r cache=FALSE}
+library(RPostgreSQL)
+library(tidyverse)
+library(tidyr)
+library(dtplyr)
+library(dbplyr)
+library(knitr)
+library(sp)
+library(sf)
+library(ggplot2)
+library(ggcorrplot)
+library(ggspatial)
+library(lubridate)
+library(scales)
+library(factoextra)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(ggdendro)
+
+```
+
+```{r echo=TRUE, cache=FALSE}
+con = dbConnect(drv = dbDriver("PostgreSQL"), 
+                dbname='sevici', user='postgres')
+```
+
+```{r echo=TRUE, cache=FALSE}
+# Función general para facilitar respuesta rápida
+
+dbQueryIf = function(qname,conn,query){
+  if(!qname %in% dbListTables(conn))
+    dbSendStatement(conn, 
+      paste0('CREATE TABLE IF NOT EXISTS ', qname, ' AS ', query))
+  dbGetQuery(conn, paste0('SELECT * FROM ',qname,';'))
+}
+```
+
+```{r echo=TRUE}
+
+if (!"seviesta" %in% ls()){
+seviesta = dbGetQuery(con, 'SELECT * FROM seviesta;')
+}
+
+```
+
+```{r}
+set.seed(12345)
+
+```
+
+# Descripción del conjunto de datos. Obtención y carga de datos
+
+## Datos dinámicos Sevici
+
+Los datos provienen de una recopilación realizada por la Universidad de Huelva, que captura los datos instantáneos ofrecidos a través de un servicio web por JCDecaux en 27 ciudades en las que opera los servicios de bicicletas compartidas. 
+
+El punto de partida ha sido un fichero comprimido que contiene para cada ciudad un conjunto de backups (mysql) en formato sql correspondiente cada uno de ellos a los datos registrados en las distintas estaciones de la ciudad en un día y que en la base de datos se corresponde cada uno con una tabla de igual nombre al fichero sql (salvo extensión).
+
+Se ha creado un base de datos (MariaDB) con igual nombre a la original, _pfcbicis_, y se ha realizado la importación de los datos con script bash.
+
+```{bash eval = FALSE}
+
+#!/bin/bash
+for f in ../data/datos/Seville/*.sql; do
+	echo "restaurando fichero $f"
+	mysql -u usu1 pfcbicis < "$f"
+done
+
+```
+
+Se han creado así 365 tablas correspondientes a cada uno de los días entre 2015-12-01 y 2016-11-30. Todas ellas con el mismo esquema:
+
+```{sql eval = FALSE}
+--
+-- Table structure for table `z_Seville_2015_12_01`
+--
+
+DROP TABLE IF EXISTS `z_Seville_2015_12_01`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `z_Seville_2015_12_01` (
+  `id`                mediumint(9) NOT NULL AUTO_INCREMENT,
+  `status`            varchar(50) DEFAULT NULL,
+  `contract`          varchar(50) DEFAULT NULL,
+  `num`               int(11) DEFAULT NULL,
+  `last_update`       datetime DEFAULT NULL,
+  `add_date`          datetime DEFAULT NULL,
+  `stands`            int(11) DEFAULT NULL,
+  `availablestands`   int(11) DEFAULT NULL,
+  `availablebikes`    int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `plantillaAjena` (`contract`,`num`)
+) ENGINE=InnoDB AUTO_INCREMENT=65827 DEFAULT CHARSET=latin1;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+```
+
+Table: Sevici. Datos dinámicos.
+
+Campo:           | Descripción: 
+-----------------|---------------------------------------------------------
+id               | Id registro autonumérico
+status           | Estado de la estación; OPEN o CLOSED
+contract         | Contrato, en nuestro caso; Seville
+num              | Número de la estación
+last_update      | Momento de última actualización
+add_date         | Fecha-Hora en fracciones de 5 minutos
+stands           | Número de estacionamientos operativos en la estación
+availablestands  | Número de estacionamientos disponibles
+availablebikes   | Número de bicicletas operativas y disponibles
+
+
+## Datos estáticos Sevici
+
+Al margen de los datos anteriormente descritos, que corresponde a los denominados datos dinámicos, en la página web del operador  (https://developer.jcdecaux.com/#/opendata/vls?page=static) están disponibles los denominados datos estáticos que hacen referencia a las características de las estaciones. Esta información se ha descargado en formato csv y contiene los siguientes datos para un total de 260 estaciones:
+
+Table: Sevici. Datos estáticos.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+Number          | Número de la estación
+Name            | Nombre de la estación
+Address         | Dirección
+Latitude        | Latitud (grados WGS84)
+Longitude       | Longitud (grados WGS84)
+
+
+Los datos originales, descritos hasta aquí, se han reorganizado de diversas formas para los diversos pretratamientos y tratamientos realizados.
+
+
+## Datos meteorológicos
+
+Se han obtenido otros datos de interés para el estudio que incluye datos meteorológicos; precipitación y temperaturas, descargados de https://datosclima.es.
+
+Los datos meteorológicos pertenecen a las estaciones de Aeropuerto de San Pablo y Tablada. Se ha obtenido una combinación de los registros de ambas estaciones que incluye para cada día la precipitación total (máxima de las dos estaciones), temperatura máxima (máxima) y temperatura mínima (mínima).
+
+Table: Meteo.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+fecha           | Fecha
+p               | Precipitación total
+tmax            | Temperatura máxima
+tmin            | Temperatura mínima
+
+
+## Calendario de festivos
+
+Un factor de interés para el estudio es obviamente el calendario laboral en el periodo considerado. Dicha información se ha incorporado manualmente a la base de datos en forma de tabla con la siguiente estructura:
+
+Table: Festivos.
+
+Campo:          | Descripción:
+----------------|------------------------------------------------------
+fecha           | Fecha del día festivo
+festivo         | Festivo
+
+
+# Pretratamiento
+
+Para facilitar los tratamientos posteriores se ha unificado la información de las 365 tablas diarias en una sola tabla (_sevidata_) y se ha creado una tabla con los datos estáticos (_seviesta_).
+
+Para la unificación se ha creado un script bash que genera script sql con la secuencia de inserts.
+
+```{sql eval=FALSE}
+
+DROP TABLE IF EXISTS `sevidata`;
+CREATE TABLE `sevidata` LIKE `z_Seville_2015_12_01`;
+```
+
+```{bash eval=FALSE}
+
+#!/bin/bash
+rm -rf unifica_data_insert.sql
+for f in *.sql; do
+	echo "procesando $f"
+	name=$(echo $f | cut -f 1 -d '.')
+	echo "INSERT INTO sevidata (status, contract, num, last_update, add_date,
+	stands, availablestands, availablebikes) SELECT status, contract, num,
+	last_update, add_date, stands, availablestands, availablebikes FROM $name;"
+	>> unifica_data_insert.sql
+done
+
+```
+
+
+## BD Postgresql
+
+Los datos se han migrado finalmente a PostgreSQL que proporciona un mejor rendimiento y funcionalidad.
+
+Se exportan a csv los datos de sevidata y se cargan en la base de datos _sevici_ de PostgreSQL (9.5.5). 
+
+```{sql eval=FALSE, echo=TRUE}
+
+-- Database: sevici
+
+-- DROP DATABASE sevici;
+
+CREATE DATABASE sevici
+  WITH OWNER = postgres
+       ENCODING = 'UTF8'
+       TABLESPACE = pg_default
+       LC_COLLATE = 'es_ES.UTF-8'
+       LC_CTYPE = 'es_ES.UTF-8'
+       CONNECTION LIMIT = -1;
+
+-- Table: public.sevidata
+
+-- DROP TABLE public.sevidata;
+
+CREATE TABLE public.sevidata
+(
+  id serial,
+  status character varying(50),
+  num integer,
+  last_update timestamp without time zone,
+  add_date timestamp without time zone,
+  stands integer,
+  availablestands integer,
+  availablebikes integer,
+  CONSTRAINT sevidata_pkey PRIMARY KEY (id)
+)
+WITH (
+  OIDS=FALSE
+);
+ALTER TABLE public.sevidata
+  OWNER TO postgres;
+
+--- Carga datos desde CSV
+
+\COPY sevidata(status,num,last_update,add_date,stands,availablestands, availablebikes) 
+FROM '/home/usu1/Documentos/Formacion/UniSE-DataScience&BigData/TFM/data/sevidata.csv' 
+DELIMITER ';' CSV;
+
+--- Índices
+
+CREATE INDEX num_idx ON sevidata(num);
+CREATE INDEX num_date_idx ON sevidata(num,add_date); 
+
+
+```
+
+
+Se crea la tabla _seviesta_ de datos estáticos.
+
+```{sql eval=FALSE, echo=TRUE}
+
+-- Table: public.seviesta
+
+-- DROP TABLE public.seviesta;
+
+CREATE TABLE public.seviesta
+(
+  id serial,
+  num integer,
+  name character varying(255),
+  address character varying(255),
+  latitude double precision,
+  longitude double precision,
+  CONSTRAINT seviesta_pkey PRIMARY KEY (id)
+)
+WITH (
+  OIDS=FALSE
+);
+ALTER TABLE public.seviesta
+  OWNER TO postgres;
+
+
+--- Carga datos 
+\COPY seviesta(num,name,address,latitude,longitude) 
+FROM '/home/usu1/Documentos/Formacion/UniSE-DataScience&BigData/TFM/data/Seville.csv' 
+WITH DELIMITER ',' CSV HEADER;
+
+--- Índice
+
+CREATE UNIQUE INDEX num_unique_idx ON seviesta(num);
+
+```
+
+
+Se crea la tabla _meteo_ de datos meteorologicos.
+
+```{sql eval=FALSE, echo=TRUE}
+
+-- Table: public.meteo
+
+-- DROP TABLE public.meteo;
+
+CREATE TABLE public.meteo
+(
+  fecha date,
+  p float,
+  tmax float,
+  tmin float,
+  CONSTRAINT meteo_pkey PRIMARY KEY (fecha)
+)
+WITH (
+  OIDS=FALSE
+);
+ALTER TABLE public.meteo
+  OWNER TO postgres;
+
+
+--- Carga datos 
+\COPY meteo(fecha,p,tmax,tmin) FROM '/home/usu1/Documentos/Formacion/UniSE-DataScience&BigData/TFM/data/meteo.csv' WITH DELIMITER ';' CSV HEADER;
+
+
+```
+
+
+Se crea la tabla _festivos_ de datos meteorologicos.
+
+```{sql eval=FALSE, echo=TRUE}
+
+-- Table: public.festivos
+
+-- DROP TABLE public.festivos;
+
+CREATE TABLE public.festivos
+(
+  fecha date,
+  festivo character varying(255),
+  CONSTRAINT festivos_pkey PRIMARY KEY (fecha)
+)
+WITH (
+  OIDS=FALSE
+);
+ALTER TABLE public.festivos
+  OWNER TO postgres;
+
+
+--- Carga datos 
+\COPY festivos(fecha,festivo) FROM '/home/usu1/Documentos/Formacion/UniSE-DataScience&BigData/TFM/data/festivos.csv' WITH DELIMITER ';' CSV HEADER;
+
+```
+
+
+## Conexión a PostgreSQL desde R
+
+```{r eval=FALSE, echo=TRUE}
+con = dbConnect(drv = dbDriver("PostgreSQL"), 
+                dbname='sevici', user='postgres')
+
+#summary(con)
+#dbListConnections(dbDriver("PostgreSQL"))
+#dbDisconnect(con)
+
+#dbListTables(con)
+
+```
+
+```{r eval=FALSE, echo=TRUE}
+
+# Función general para facilitar respuesta rápida
+# a costa de disco
+#
+dbQueryIf = function(qname,conn,query){
+  if(!qname %in% dbListTables(conn))
+    dbSendStatement(conn, 
+      paste0('CREATE TABLE IF NOT EXISTS ', qname, ' AS ', query))
+  dbGetQuery(conn, paste0('SELECT * FROM ',qname,';'))
+}
+
+```
+
+\newpage
+
+# Localización de estaciones
+
+La geolocalización de las estaciones podrá permitir mediante análisis espacial relacionar ésta y su dinámica con otras variables geolocalizadas como pueden ser usos del suelo, servicios, variables socio-demográficas, etc.
+
+![Mapa de Estaciones Sevici etiquetadas y BingMap de fondo. Hecho con QGIS.](../data/mapas/Sevici-number-bing_minipoint.png)
+
+\newpage
+
+
+```{r}
+#seviesta = dbGetQuery(con, 'SELECT * FROM seviesta;')
+head(seviesta)
+
+seviesta_sp = seviesta
+coordinates(seviesta_sp) = c('longitude','latitude')
+class(seviesta_sp)
+proj4string(seviesta_sp) = CRS("+init=epsg:4326")
+
+seviesta_sf = st_as_sf(seviesta_sp)
+class(seviesta_sf)
+head(seviesta_sf)
+#st_bbox(seviesta_sf)
+
+```
+
+
+```{r fig.cap='Localización de estaciones SEVICI', fig.width=8, fig.height=10}
+
+ggosm(type = 'hikebike', quiet = TRUE) + 
+  geom_spatial(seviesta_sp, color='red', alpha=0.6, size=0.4) +
+  labs(x="",y="") + coord_map() + 
+  geom_text(data=seviesta, aes(longitude, latitude, label=num), 
+            check_overlap = TRUE, size=1.7, 
+            fontface = "italic", 
+            angle=0, vjust=1, color='black', alpha=0.9) +
+  theme_bw()
+```
+
+```{r fig.cap='Localización de estaciones SEVICI con Identificadores', fig.width=7, fig.height=9}
+
+ggosm(type = 'cartolight', quiet = TRUE) + 
+  geom_spatial(seviesta_sp, color='red', alpha=0.1, size=2.5) +
+  labs(x="",y="") + coord_map() + 
+  geom_text(data=seviesta, aes(longitude, latitude, label=num), 
+            check_overlap = TRUE, size=2.0, 
+            fontface = "italic", 
+            angle=0, vjust=0.2, color='blue', alpha=0.6) + 
+  theme_bw()
+
+```
+
+
+# Análisis preliminar de datos
+
+## Resumen general de datos
+
+```{r}
+
+if (!"resumen_general_datos" %in% ls()){
+resumen_general_datos = 
+  dbQueryIf('resumen_general_datos',con,
+  'SELECT count(id) as N, min(num) as minnum, max(num) as maxnum,
+    min(last_update) as desde, max(last_update) as hasta,
+    min(add_date) as pdesde, max(add_date) as phasta,
+    min(stands) as minst, max(stands) as maxst,
+    avg(stands) as avgst,
+    min(availablestands) as minavst,
+    max(availablestands) as maxavst,
+    avg(availablestands) as avgavst,
+    min(availablebikes) as minbikes,
+    max(availablebikes) as maxbikes,
+    avg(availablebikes) as avgbikes
+    FROM sevidata;'
+  )
+}
+```
+
+
+```{r}
+kable(resumen_general_datos[,1:7], 
+      caption = 'Resumen general de datos')
+kable(resumen_general_datos[,8:16], 
+      caption = 'Resumen general de datos (cont.)')
+```
+
+
+## Resumen de datos por estación
+
+```{r}
+
+if (!"resumen_datos_por_estacion" %in% ls()){
+resumen_datos_por_estacion = 
+  dbQueryIf('resumen_datos_por_estacion',con,
+  'SELECT num, count(id) as N,
+    min(last_update) as desde, max(last_update) as hasta,
+    min(add_date) as pdesde, max(add_date) as phasta,
+    min(stands) as minst, max(stands) as maxst,
+    avg(stands) as avgst,
+    min(availablestands) as minavst,
+    max(availablestands) as maxavst,
+    avg(availablestands) as avgavst,
+    min(availablebikes) as minbikes,
+    max(availablebikes) as maxbikes,
+    avg(availablebikes) as avgbikes
+    FROM sevidata group by num order by num;'
+  )
+}
+```
+
+```{r}
+kable(resumen_datos_por_estacion[,1:6],
+             caption = 'Resumen de datos por estación')
+kable(resumen_datos_por_estacion[,c(1,7:15)], digits = 2, 
+      caption = 'Resumen de datos por estación (continuación)')
+```
+
+
+Un primer vistazo al resumen anterior muestra la existencia de varias situaciones singulares o anómalas como las siguientes:
+
+i) La estación 109 (Avenida de San Francisco Javier) tiene registros solamente durante un período de tres meses aproximadamente desde inicio.
+ii) El resto de estaciones tiene registros desde fecha de inicio a fecha de fin.
+iii) Los 365 días de datos deberían en teoría proporcionar para cada estación un total de 105120 registros para un frecuencia de 1/5min, sin embargo, ninguna estación alcanza dicha número total, lo que era más o menos esperable por interrupciones de registro fortuitas, etc. 
+
+a) Para todas las estaciones el número de estacionamientos operativos es constante.
+b) Hay un buen número de estaciones en las que en algún momento se ha registrado un número de estacionamientos disponibles mayor que los operativos, lo cual, obviamente es un error.
+c) Igualmente hay bastantes estaciones en las que en algún momento se ha registrado un número de bicicletas disponibles mayor que el número de estacionamientos operativos.
+
+Procede, visto lo visto, una depuración que permita en primer lugar, identificar:
+
+- posibles datos replicados, 
+- datos faltantes y 
+- registros anómalos
+
+
+## Datos replicados, faltantes y anómalos
+
+### Datos replicados
+
+En teoría la combinación (num - add_date) debe ser única, esto es, para cada estación y periodo (de 5min) debe haber un único registro.
+
+```{r}
+if (!"sevidata_rep_num_add_date" %in% dbListTables(con))
+  dbSendStatement(con,
+    'CREATE TABLE IF NOT EXISTS sevidata_rep_num_add_date AS
+      SELECT num, add_date, count(id) AS Rep
+          FROM sevidata GROUP BY num, add_date HAVING count(id) > 1;')
+
+if (!"sevidata_rep" %in% ls())
+  sevidata_rep = dbQueryIf("sevidata_rep",con,
+    'SELECT T.*, Q.Rep,
+        rank() OVER (PARTITION BY T.num, T.add_date ORDER BY T.id)
+      FROM sevidata_rep_num_add_date as Q, sevidata as T
+      WHERE Q.num = T.num and Q.add_date = T.add_date
+      ORDER BY T.num, T.add_date, T.id;')
+
+```
+
+El número de registros repetidos es de `r nrow(sevidata_rep)`, una muestra de ellos se recoge seguidamente.
+
+```{r, results = 'asis', warning=FALSE, message=FALSE}
+
+kable(sevidata_rep[c(1:10,5001:5010),c(1,3,4,5,9,10)],
+      caption = 'Muestra de datos replicados en sevidata')
+```
+
+```{r}
+
+if (!"sevidata_rep_by_num" %in% ls()){
+sevidata_rep_by_num = dbGetQuery(con,
+    'SELECT num, min(add_date) desde, max(add_date) hasta,
+    min(Rep), max(Rep), count(*) as NRep
+    FROM sevidata_rep_num_add_date group by num order by num;')
+}
+
+```
+
+```{r}
+summary(sevidata_rep_by_num)
+```
+
+```{r fig.width=7, fig.height=2, fig.cap='Datos replicados por estación.'}
+
+ggplot(sevidata_rep_by_num)+
+  geom_linerange(aes(x=num,ymin=0,ymax=nrep),
+                 color = 'red', alpha = 0.3)+
+  labs(x="Estación", y="Replicados")+
+  scale_x_continuous(minor_breaks = seq(0,280,10))
+
+```
+
+
+Todas las estaciones, salvo la estación 109, presentan 12 datos duplicados que se concentran en un día, entre 2016-10-30 02:00:01 y 2016-10-30 02:55:01.
+
+259 x 12 x 2 = `r eval(259*12*2)` que es el número total de réplicas.
+
+Volviendo a los datos originales (backups) se comprueba que todos se encuentran en la tabla *z_Seville_2016_10_30*.
+
+Para facilitar el manejo de duplicados y otras incidencias en los datos, antes en su caso de eliminación de los registros implicados, se modifica la estructura de _sevidata_ añadiendo un campo indicador, _ok_, para recoger las distintas incidencias. Se crea también un índice *ok_idx* para acelerar filtrados.
+
+- Sin incidencia:  ok = 1.
+```{r eval = FALSE}
+dbSendStatement(con, 'ALTER TABLE sevidata 
+                      ADD COLUMN ok smallint DEFAULT 1;')
+dbSendStatement(con, 'CREATE INDEX ok_idx ON sevidata (ok);')
+
+dbSendStatement(con, 'UPDATE sevidata SET ok = 1;')
+
+```
+
+- Duplicado:  ok = 2.
+```{r eval = FALSE}
+dbSendStatement(con, 'UPDATE sevidata SET ok = 2 WHERE sevidata.id IN 
+                      (SELECT sevidata_rep.id FROM sevidata_rep 
+                      WHERE sevidata_rep.rank = 2);')
+```
+
+sevici=# select count(*) from sevidata where ok = 2;
+
+  count   
+ ........  
+  3108  
+ (1 fila)  
+
+
+### Datos faltantes
+
+Para identificar los posibles huecos en las series temporales de cada estación, vamos en primer lugar a obtener la secuencia temporal de 5 min de paso, para el conjunto de las estaciones, esto es, el listado ordenado de valores únicos de la columna *add_date*.
+
+```{r}
+if (!"lista_add_date" %in% ls()){
+lista_add_date = dbQueryIf('lista_add_date', con,
+                  'SELECT DISTINCT add_date
+                  FROM sevidata ORDER BY add_date;')
+}
+```
+
+El listado lo forman `r nrow(lista_add_date)` registros. Como ya se ha señalado anteriormente el número teórico de registros entre inicio y fin  para cada estación es de 105120 (365 días x 24 horas x 12 p5min), a lo que hay que añadir 12 registros adicionales hasta las 00:55:01 del día de fin 2016-11-30 (105132), lo que supone que existen `r eval(105120 + 12 - nrow(lista_add_date))` huecos de 5min sin datos que afectan a la totalidad de las estaciones. El número total de huecos entre todas las estaciones será obviamente muy superior y al menos de ese tamaño para cada estación.
+
+Para explorar los huecos de datos faltantes se construye una serie entre inicio y fin con paso de 5min y se vincula al minuto con la secuencia real de *add_date* allí donde exista.
+
+```{r echo=TRUE}
+
+if (!"lista5min_con_huecos" %in% ls()){
+lista5min_con_huecos = dbQueryIf('lista5min_con_huecos',con,
+  "SELECT p5min, L.add_date
+  FROM generate_series
+  ( '2015-12-01 00:00'::timestamp
+  , '2016-11-30 00:55'::timestamp
+  , '5 min'::interval) p5min
+  LEFT JOIN lista_add_date L ON
+  date_trunc('minute', L.add_date) = p5min
+  ;")
+}
+
+```
+
+```{r, results = 'asis', warning=FALSE, message=FALSE}
+kable(lista5min_con_huecos[c(1:5,200:210,105120:105132),],
+        caption = 'Muestra de secuencia temporal completa y secuencia real con datos faltantes')
+```
+
+
+Para almacenar la información en forma de series temporales correspondientes a cada estación y variable (s: availablestands, b:availablebikes) creamos la tabla _sevicip5m_  a partir de la anteriormente creada, *lista5min_con_huecos*
+
+```{sql connection=con, eval=FALSE}
+
+CREATE TABLE sevicip5m
+(
+  p5min timestamp,
+  hueco boolean,
+  CONSTRAINT sevicip5m_pkey PRIMARY KEY (p5min)
+)
+WITH (
+  OIDS=FALSE
+);
+ALTER TABLE sevicip5m
+  OWNER TO postgres;
+
+INSERT INTO sevicip5m (p5min, hueco)
+SELECT p5min, 
+CASE isfinite(add_date) WHEN TRUE THEN false ELSE true END as hueco 
+FROM Lista5min_con_huecos order by p5min;
+
+```
+
+
+se añaden las columnas correspondientes a cada estación-variable 
+
+```{r eval=FALSE}
+
+for (num in 1:260){
+  for (var in c('s','b')){
+    addCol = paste0('ALTER TABLE sevicip5m ADD COLUMN ',
+                    var,num,' smallint;')
+    dbSendStatement(con, addCol)
+  }
+}
+
+```
+
+
+se incorporan los datos de _sevidata_ a la tabla _sevicip5m_
+
+```{r eval=FALSE}
+#
+# Ojo, este script ha tardado más de 12h
+#
+
+for (num in 1:260)
+{
+addColDataS = paste0("UPDATE sevicip5m as T SET s", num, " =
+          D.availablestands FROM (select add_date, availablestands from
+          sevidata where ok = 1 and num = ", num,") AS D WHERE
+          date_trunc('minute', D.add_date) = T.p5min;")
+
+addColDataB = paste0("UPDATE sevicip5m as T SET b", num, 
+          " = D.availablebikes FROM (select add_date,
+          availablebikes from sevidata where ok = 1 and num = ", num,") AS D 
+          WHERE date_trunc('minute', D.add_date) = T.p5min;")
+
+dbSendStatement(con, addColDataS)
+dbSendStatement(con, addColDataB)
+
+print(num)
+#print(addColDataS)
+#print(addColDataB)
+}
+
+```
+
+```{r}
+if (!"sevicip5m" %in% ls()){
+  sevicip5m = dbGetQuery(con,"select * from sevicip5m;")
+}
+```
+
+```{r}
+sevicip5m[1:5,c(1:10,521,522)]
+```
+
+```{r}
+sevicip5m %>% group_by(hueco) %>% summarise(n=n())
+
+```
+
+La variable _hueco_ indica si es un hueco global o no, es decir, si no existe ningún dato para ninguna estación en ese momento (p5min)(TRUE) o existe al menos una con datos (FALSE).
+
+Seguidamente se presenta la distribución temporal de los huecos globales por fecha y hora, día de la semana y mes.
+
+
+```{r}
+L5min = sevicip5m[,1:2]
+```
+
+```{r}
+L5min$DIA = as.Date(L5min$p5min)
+L5min$HORAM = hour(L5min$p5min) + minute(L5min$p5min)/60
+L5min$HORA = hour(L5min$p5min)
+L5min$MES = format(L5min$DIA, "%m")
+L5min$DSEM = format(L5min$DIA,"%a")
+L5min$DSEMN = wday(L5min$DIA)
+
+head(L5min,5)
+```
+
+```{r fig.cap='Datos faltantes. Huecos Globales por Fecha y Hora', fig.width=7, fig.height=9}
+
+L5min %>% group_by(DIA, HORA) %>% summarise(HUECOS = sum(hueco)) %>% 
+  filter(HUECOS>0) %>%
+  ggplot(aes(x=HORA,y=DIA))+ 
+    geom_tile(aes(fill=HUECOS))+
+    scale_fill_gradientn(colors = c('black','red'))+
+    labs(x="Hora", y="Fecha")+
+    scale_y_date(date_breaks = "1 month", labels = date_format("%Y-%m"))+
+    scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))
+
+```
+
+```{r fig.cap='Datos faltantes. Huecos Globales por Fecha'}
+
+L5min %>% group_by(DIA) %>% summarise(HUECOS = sum(hueco)) %>% 
+  filter(HUECOS>0) %>%
+    ggplot(aes(DIA,HUECOS,label=DIA))+
+      geom_point(shape = 21, colour = "red", size = 3, stroke = 0.5)+
+      geom_line(colour = "orange",linetype = 2, size=0.4)+
+      geom_text(check_overlap = TRUE, angle=0, size=2.5, vjust=-1)+
+      labs(x="Fecha", y="Número de Huecos")
+
+```
+
+```{r fig.cap='Datos faltantes. Huecos Globales por Hora'}
+
+L5min %>% group_by(HORA) %>% summarise(HUECOS = sum(hueco)) %>% 
+  filter(HUECOS>0) %>%
+    ggplot(aes(HORA,HUECOS,label=HUECOS))+
+      geom_point(shape = 21, colour = "blue", size = 3, stroke = 0.5)+
+      geom_line(colour = "orange",linetype = 2, size=0.4)+
+      geom_text(check_overlap = TRUE, angle=0, size=2.5, vjust=-2)+
+      labs(x="Hora", y="Número de Huecos")
+
+```
+
+```{r fig.cap='Datos faltantes. Huecos Globales por Mes'}
+
+L5min %>% group_by(MES) %>% summarise(HUECOS = sum(hueco)) %>% 
+  filter(HUECOS>0) %>%
+    ggplot(aes(MES,HUECOS,group = 1,label=HUECOS))+
+      geom_point(shape = 21, colour = "green", size = 3, stroke = 0.5)+
+      geom_line(colour = "orange",linetype = 2, size=0.4)+
+      geom_text(check_overlap = TRUE, angle=0, size=2.5, vjust=-2)+
+      labs(x="Mes", y="Número de Huecos")
+
+```
+
+```{r fig.cap='Datos faltantes. Huecos Globales por Día de la Semana'}
+
+L5min %>% group_by(DSEMN) %>% summarise(HUECOS = sum(hueco)) %>% 
+  filter(HUECOS>0) %>%
+    ggplot(aes(factor(DSEMN,labels = c('D','L','M','X','J','V','S')),
+           HUECOS,group = 1,label=HUECOS))+
+      geom_col(fill = 'orange')+
+      geom_text(check_overlap = TRUE, angle=0, size=2.5, vjust=1)+
+      labs(x="Día de la Semana", y="Número de Huecos")
+```
+
+
+El número de huecos para cada estación es el siguiente:
+
+```{r}
+na_count <-sapply(select(sevicip5m,starts_with('s')), 
+                  function(y) sum(length(which(is.na(y)))))
+na_df = data.frame(na_count)
+na_df = data.frame('num' = as.integer(substr(rownames(na_df),2,10)),na_df)
+
+# Listamos
+multi_na_df = bind_cols(na_df[1:65,],na_df[66:130,])
+multi_na_df = bind_cols(multi_na_df, na_df[131:195,])
+multi_na_df = bind_cols(multi_na_df, na_df[196:260,])
+#multi_na_df
+
+```
+
+```{r, results = 'asis', warning=FALSE, message=FALSE}
+kable(multi_na_df, digits = 2,
+             caption = "Resumen de Huecos por Estación")
+```
+
+```{r}
+
+# Resumen
+summary(na_df$na_count)
+
+resumen_huecos = data.frame(
+  'Variable'= c(
+    'Número de huecos','Número de huecos en estación 109', 
+    'Número de huecos sin estación 109', 'Número de p5min con huecos globales',
+    'Número de huecos globales (sin e109)', 'Número de huecos específicos (sin e109)'
+  ),'Valor'= c(
+    sum(na_count), na_count[109],
+    sum(na_count)-na_count[109], eval(105132 - nrow(lista_add_date)),
+    eval((105132 - nrow(lista_add_date))*259), 
+    sum(na_count)-na_count[109]-eval((105132 - nrow(lista_add_date))*259)
+  ) 
+)
+
+```
+
+```{r, results = 'asis', warning=FALSE, message=FALSE}
+kable(resumen_huecos, digits = 2,
+             caption = "Resumen de Huecos")
+```
+
+```{r fig.cap='Datos faltantes. Número de Huecos por Estación'}
+
+ggplot(na_df, aes(num,na_count,label=num))+
+  geom_point(shape = 21, colour = "green", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de Huecos")
+
+```
+
+```{r fig.cap='Datos faltantes. Número de Huecos por Estación (<6000 Huecos)'}
+ggplot(na_df[na_df$na_count<6000,], aes(num,na_count,label=num))+
+  geom_point(shape = 21, colour = "green", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de Huecos")
+
+```
+
+El número total de huecos en el conjunto de datos es `r sum(na_count)` de los cuales  `r na_count[109]` corresponden a la estación 109 que como ya se señaló sólo estuvo en funcionamiento durante aproximadamente los tres primeros meses de estudio. Excluyendo la estación 109 se tendrán `r sum(na_count)-na_count[109]` huecos. 
+
+Recordar que el número de periodos de 5min que afectan a la totalidad de estaciones es de 962, lo que supone un total de 962 x 259 = 249158 huecos globales, excluida la estación 109, y por tanto, el número de huecos en los que existe al menos una estación con datos es de 605662.
+
+Más adelante se juzgará la necesidad, alcance y forma de imputación de los datos faltantes.
+
+
+### Datos anómalos
+
+Entre los datos anómalos se consideran las siguientes situaciones:
+
+a) Número de estacionamientos disponibles mayor que operativos
+b) Número de bicicletas disponibles mayor que estacionamientos operativos
+c) Suma de estacionamientos disponibles y bicicletas disponibles mayor que el número de estacionamientos operativos.
+d) Suma de estacionamientos disponibles y bicicletas disponibles menor que el número de estacionamientos operativos.
+
+Se codifican dichas situaciones en la tabla _sevidata_ en el campo _ok_ con los siguientes valores:
+
+ a) --> ok = 3    b) --> ok = 4     c) --> ok = 5   d) --> ok = 6 
+
+```{r eval=FALSE}
+# Ojo con el orden de los UPDATE
+
+dbSendStatement(con, 'UPDATE sevidata SET ok = 5
+                      WHERE ok=1 and stands < availablestands + availablebikes;')
+
+dbSendStatement(con, 'UPDATE sevidata SET ok = 6
+                      WHERE ok=1 and stands > availablestands + availablebikes;')
+
+dbSendStatement(con, 'UPDATE sevidata SET ok = 3
+                      WHERE ok=1 and stands < availablestands;')
+
+dbSendStatement(con, 'UPDATE sevidata SET ok = 4
+                      WHERE ok=1 and stands < availablebikes;')
+```
+
+
+```{r}
+if (!"resumen_datos_anomalos_por_estacion" %in% ls()){
+ resumen_datos_anomalos_por_estacion =
+  dbQueryIf('resumen_datos_anomalos_por_estacion',con,
+  'SELECT num, ok, status, count(id) as N
+    FROM sevidata group by num, ok , status order by num, ok, status;')
+}
+
+```
+
+Se muestra seguidamente el resumen incidencias relativas a datos duplicados y anómalos identificados
+
+```{r}
+resumen_tabla_ok = spread(resumen_datos_anomalos_por_estacion, 
+                          ok, n, sep = '_', fill = 0)
+
+resumen_tabla_ok = mutate(resumen_tabla_ok, 
+                          TotOK_2_6 = ok_2+ok_3+ok_4+ok_5+ok_6,
+                          Total = ok_1 + TotOK_2_6)
+```
+
+```{r}
+kable(
+bind_rows(
+  resumen_tabla_ok %>% group_by(status) %>% summarise_all(funs(sum)),
+  resumen_tabla_ok %>% select(c(-status,-num)) %>% summarise_all(funs(sum))
+),
+caption = "Resumen de datos anómalos por status y global"
+)
+
+```
+
+
+Valor ok | Descripción
+---------|------------------------------
+ok_1     | Sin incidencia aparente
+ok_2     | Dato duplicado
+ok_3     | Estacionamientos disponibles > Est. operativos
+ok_4     | Bicicletas disponibles > Est. operativos
+ok_5     | Estacionamientos + Bicicletas disponibles > Est. operativos 
+ok_6     | Estacionamientos + Bicicletas disponibles < Est. operativos 
+
+
+```{r, results = 'asis', warning=FALSE, message=FALSE}
+kable(resumen_tabla_ok %>% select(-status) %>% 
+        group_by(num) %>% summarise_all(funs(sum)), 
+      caption = "Resumen de datos anómalos por estación")
+```
+
+
+```{r fig.cap='Datos anómalos. Estacionamientos disponibles > Est. Operativos'}
+ggplot(resumen_tabla_ok[resumen_tabla_ok$ok_3 > 0,], aes(num, ok_3, label=num))+
+  geom_point(shape = 21, colour = "red", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de registros con incidencia")
+```
+
+
+```{r fig.cap='Datos anómalos. Bicicletas disponibles > Est. Operativos'}
+ggplot(resumen_tabla_ok[resumen_tabla_ok$ok_4 > 0,], aes(num, ok_4, label=num))+
+  geom_point(shape = 21, colour = "orange", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de registros con incidencia")
+```
+
+
+```{r fig.cap='Datos anómalos. Estacionamientos + Bicicletas disponibles > Est. Operativos'}
+ggplot(resumen_tabla_ok[resumen_tabla_ok$ok_5 > 0,], aes(num, ok_5, label=num))+
+  geom_point(shape = 21, colour = "blue", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de registros con incidencia")
+```
+
+
+```{r fig.cap='Datos anómalos. Estacionamientos + Bicicletas disponibles < Est. Operativos'}
+ggplot(resumen_tabla_ok[resumen_tabla_ok$ok_6 > 0,], aes(num, ok_6, label=num))+
+  geom_point(shape = 21, colour = "green", size = 3, stroke = 0.5)+
+  geom_text(check_overlap = TRUE, angle=0, size=1.8, vjust=-2)+
+  labs(x="Estación", y="Número de registros con incidencia")
+```
+
+
+El número de datos anómalos representa el 16.54% del total de datos registrados. De todos ellos la situación más frecuente, con diferencia, es aquélla en la que la suma de estacionamientos disponibles y bicicletas disponibles es menor que el número de estacionamientos operativos (ok=6), con un 16.50% del total de registros. 
+
+La situación anómala descrita, ok=6, podría en teoría responder a retrasos puntuales en la transmisión de datos. 
+
+Es necesario tener en cuenta que el número de estacionamientos operativos se ha comprobado que aparece como constante durante todo el periodo estudiado para todas las estaciones, que es lo realmente sorprendente, si dicho dato se obtiene de modo similar al de disponibilidad de estacionamientos y bicicletas.
+
+Tanto si responde a retrasos puntuales como al no correcto registro de los momentos de inoperatividad, la consideración del número efectivo de estacionamientos operativos como la suma de estacionamientos y bicicletas disponibles siempre que ésta sea menor o igual al número registrado de estacionamientos operativos (nominal) permite tener en consideración estas situaciones (ok=6) como registros válidos y tratarlos de forma conjunta a los de la situación sin incidencia aparente (ok=1).
+
+
+## Datos meteorológicos
+
+```{r}
+if (!"meteo" %in% ls()){
+  meteo = dbGetQuery(con,"select * from meteo;")
+}
+```
+
+```{r}
+kable(summary(meteo), align = 'r',
+      caption = "Resumen estadístico de variables meteorológicas")
+```
+
+```{r fig.cap='Datos meteorológicos. Serie de precipitación total diaria.'}
+
+ggplot(meteo)+
+  #geom_line(aes(fecha, p), colour = "blue")+
+  geom_linerange(aes(x=fecha, ymin=0, ymax=p), colour = "blue")+
+  labs(x="Fecha", y="Precipitación (mm)")+
+  scale_x_date(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos meteorológicos. Series de temperaturas máximas y mínimas diarias.'}
+
+ggplot(meteo)+
+  geom_line(aes(fecha, tmax), colour = "orange")+
+  geom_line(aes(fecha, tmin), colour = "cyan")+
+  labs(x="", y="Temperatura (ºC)")+
+  scale_x_date(date_minor_breaks = "1 month")
+```
+
+
+# Análisis de datos válidos globales
+
+Se consideran como datos válidos, entre los datos dinámicos Sevici, todos aquellos provenientes de registros no duplicados en los que la suma de estacionamientos y bicis disponibles es menor o igual que el número (nominal) de estacionamientos operativos. Son datos válidos globlales la agregación de datos válidos entre todas las estaciones en un momento determinado.
+
+
+```{r}
+
+if (!"datos_validos_globales" %in% ls()){
+ datos_validos_globales =
+  dbQueryIf('datos_validos_globales',con,
+  'SELECT add_date as p5min,
+    date(add_date) as fecha,
+    EXTRACT(ISODOW FROM add_date) as dsem,
+    count(num) as nn,
+    date(add_date) in (select fecha from festivos) as fest,
+    sum(stands) as st,
+    sum(availablestands) as ss,
+    sum(availablebikes) as sb,
+    avg(stands) as avt,
+    avg(availablestands) as avs,
+    avg(availablebikes) as avb
+    FROM sevidata WHERE ok = 1 or ok = 6
+    GROUP BY add_date ORDER BY add_date;')
+}
+
+```
+
+```{r}
+datos_validos_globales$dsem = factor(datos_validos_globales$dsem, 
+        labels = c('L','M','X','J','V','S','D'))
+```
+
+```{r}
+datos_validos_globales$fsof = 
+  datos_validos_globales$fest | (datos_validos_globales$dsem %in% c('S','D'))
+```
+
+```{r}
+datos_validos_globales$hora = hour(datos_validos_globales$p5min)
+```
+
+
+Una muestra de datos válidos globales se muestra seguidamente, en la que:
+
+Table: Datos globales. Variables.
+
+Variable   | Descripción
+-----------|--------------------------------------------------
+p5min      | Periodo de 5min
+dsem       | Día de la semana
+fest       | Festivo?
+fsof       | Fin de semana o Festivo?
+hora       | Hora del día
+nn         | Número de estaciones operativas
+st         | Suma del número de estacionamientos operativos
+ss         | Suma del número de estacionamientos disponibles
+sb         | Suma del número de bicicletas disponibles
+avt        | Media del número de estacionamientos operativos
+avs        | Media del número de estacionamientos disponibles
+avb        | Media del número de bicicletas disponibles
+
+```{r}
+kable(sample_n(datos_validos_globales,10), digits = 2,
+      caption="Datos globales. Muestra de datos.")
+```
+
+El resumen estadístico de las variables definidas es el siguiente:
+
+```{r}
+summary(datos_validos_globales)
+```
+
+
+El número de estaciones puede verse que varía entre 14 y 260. Los casos con menos de 260 estaciones corresponderían a la existencia de datos faltantes para algunas o muchas estaciones. Los gráficos siguientes ponen de manifiesto claramente el impacto de los datos faltantes. 
+
+```{r fig.cap='Datos válidos globales. Número de estaciones con datos.', fig.width=7,fig.height=2}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, nn), colour = "red")+
+  labs(x="Tiempo", y="Número de estaciones")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Número de estaciones con datos. Momentos singulares.', fig.width=7,fig.height=2}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, nn), colour = "red")+
+  geom_text(data=(datos_validos_globales %>% filter(nn<200)),
+            aes(p5min, nn, label = p5min), check_overlap = TRUE,
+            angle=90, size=2, vjust=-0.5, hjust=-0.1)+
+  labs(x="Tiempo", y="Número de estaciones")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Suma de Estacionamientos disponibles.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, ss), colour = "blue")+
+  labs(x="Tiempo", y="Disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Suma de Bicis disponibles.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, sb), colour = "orange")+
+  labs(x="Tiempo", y="Disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Distribución de Estacionamientos y Bicis disponibles (Sumas).'}
+
+ggplot(datos_validos_globales)+
+  # geom_histogram(aes(ss)) +
+  geom_histogram(aes(ss), color = 'blue', alpha = 0.1) +
+  geom_histogram(aes(sb), color = 'orange', alpha = 0.1) +
+  annotate('text', x=2500, y=43000, label='Estacionamientos \n disponibles', color='blue') +
+  annotate('text', x=1400, y=45000, label='Bicis \n disponibles',
+           color='orange') +
+  labs(x="Número", y="Frecuencia")
+
+```
+
+
+Una mejor aproximación a los datos globales puede ser su estimación a partir de las medias, expandidas al conjunto de estaciones. Los resultados de este proceder se muestran seguidamente.
+
+
+```{r fig.cap='Datos válidos globales. Número medio de Estacionamientos disponibles por estación.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, avs), colour = "blue")+
+  labs(x="Tiempo", y="Estacionamientos disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+
+```{r fig.cap='Datos válidos globales. Número medio de Bicis disponibles por estación.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, avb), colour = "orange")+
+  labs(x="Tiempo", y="Bicis disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+
+```{r fig.cap='Datos válidos globales. Estacionamientos disponibles. Estimación.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, 260*avs), colour = "blue")+
+  labs(x="Tiempo", y="Estacionamientos disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles. Estimación.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, 260*avb), colour = "orange")+
+  labs(x="Tiempo", y="Bicis disponibles")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+```{r fig.cap='Datos válidos globales. Distribución de Estacionamientos y Bicis disponibles. Estimación.'}
+
+ggplot(datos_validos_globales)+
+  # geom_histogram(aes(ss)) +
+  geom_histogram(aes(260*avs), color = 'blue', alpha = 0.1) +
+  geom_histogram(aes(260*avb), color = 'orange', alpha = 0.1) +
+  annotate('text', x=3500, y=40000, label='Estacionamientos \n disponibles', color='blue') +
+  annotate('text', x=1500, y=40000, label='Bicis \n disponibles',
+           color='orange') +
+  labs(x="Número", y="Frecuencia")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Diferencia Estacionamientos y Bicis disponibles.'}
+
+ggplot(datos_validos_globales)+
+  geom_line(aes(p5min, 260*(avs-avb)), colour = "green")+
+  geom_smooth(aes(p5min, 260*(avs-avb)), method = lm, colour = "red")+
+  labs(x="Tiempo", y="Diferencia")+
+  scale_x_datetime(date_minor_breaks = "1 month")
+```
+
+El número de estacionamientos disponibles, asimilable en cierta forma a bicicletas circulantes o en uso, es superior al de bicis disponibles a lo largo de todo el periodo analizado (salvo a finales de marzo, semana santa). Fenómeno con una aparente tendencia a su reducción.
+
+
+## Análisis según días de la semana y festivos
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según día de la semana.'}
+
+ggplot(datos_validos_globales)+
+  geom_boxplot(aes(dsem, 260*avb, group=dsem), colour = 'blue')+
+  labs(x="Día de la semana", y="Estacionamientos disponibles")
+```
+
+```{r}
+datos_validos_globales %>% group_by(dsem) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles por día de la semana. 
+        Estadística básica.')
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles por día de la semana. Estadística básica. Mediana, Máximo y Mínimo.'}
+
+datos_validos_globales %>% group_by(dsem) %>% 
+  summarise(median=median(260*avb),
+            min=min(260*avb), max=max(260*avb)) %>% 
+  ggplot(ymin=2000) + 
+    geom_crossbar(aes(x=dsem,y=median,ymax=max,ymin=min), color = 'blue')+
+    labs(x="Día de la semana", y="Bicis disponibles")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles por día de la semana. Media +/- Desviación'}
+
+datos_validos_globales %>% group_by(dsem) %>% 
+  summarise(mean = mean(260*avb), sd=sd(260*avb)) %>% 
+  ggplot() + 
+    geom_pointrange(aes(x=dsem,y=mean,ymax=mean+sd,ymin=mean-sd), color='blue')+
+    coord_flip() +
+    labs(x="Día de la semana", y="Bicis disponibles")
+
+```
+
+
+
+```{r}
+datos_validos_globales %>% group_by(fsof) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles según sea 
+          fin de semana - festivo o no. Estadística básica.')
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según sea fin de semana - festivo o no.'}
+
+ggplot(datos_validos_globales)+
+  geom_boxplot(aes(fsof, 260*avb, group=fsof), colour = 'blue')+
+  labs(x="Fin de semana o festivo", y="Bicis disponibles")
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según sea fin de semana - festivo o no. Estadística básica. Mediana, Máximo y Mínimo.'}
+
+datos_validos_globales %>% group_by(fsof) %>% 
+  summarise(median=median(260*avb),
+            min=min(260*avb), max=max(260*avb)) %>% 
+  ggplot(ymin=2000) + 
+    geom_crossbar(aes(x=fsof,y=median,ymax=max,ymin=min), color = 'blue')+
+    labs(x="Fin de semana o festivo", y="Bicis disponibles")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según sea fin de semana - festivo o no. Media +/- 2·Desviación'}
+
+datos_validos_globales %>% group_by(fsof) %>% 
+  summarise(mean = mean(260*avb), sd=sd(260*avb)) %>% 
+  ggplot() + 
+    geom_pointrange(aes(x=fsof,y=mean,ymax=mean+2*sd,ymin=mean-2*sd),
+                    color='orange')+
+    labs(x="Fin de semana o festivo", y="Bicis disponibles")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Distribución de Bicis disponibles según sea fin de semana - festivo o no.'}
+
+ggplot(datos_validos_globales)+
+  geom_histogram(data=datos_validos_globales %>% filter(fsof==TRUE), 
+                 aes(260*avb), color = 'red', alpha = 0.2) +
+  geom_histogram(data=datos_validos_globales %>% filter(fsof==FALSE), 
+    aes(260*avb), color = 'blue', alpha = 0.1) +
+  annotate('text', x=2450, y=9000, 
+           label='Fines de semana\ny festivos', color='red') +
+  annotate('text', x=1650, y=16000, 
+           label='Días laborables', color='blue') +
+  labs(x="Bicis disponibles", y="Frecuencia")
+
+```
+
+
+## Análisis según hora del día
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según hora del día.'}
+
+ggplot(datos_validos_globales)+
+  geom_boxplot(aes(hora, 260*avb, group=hora), color = 'blue')+
+  scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+  labs(x="Hora del día", y="Bicis disponibles")
+```
+
+
+```{r}
+datos_validos_globales %>% group_by(hora) %>% 
+  summarise(mean = mean(260*avb), median=median(260*avb),
+            min=min(260*avb), max=max(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  kable(caption = 'Bicis disponibles por hora del día. Estadística básica.')
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles por hora del día. Mediana, Máximo y Mínimo'}
+
+datos_validos_globales %>% group_by(hora) %>% 
+  summarise(median=median(260*avb),
+            min=min(260*avb), max=max(260*avb)) %>% 
+  ggplot() + 
+    geom_crossbar(aes(x=hora,y=median,ymax=max,ymin=min), color = 'blue')+
+    scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(x="Hora del Día", y="Bicis disponibles")
+
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles por hora del día. Media +/- Desviación'}
+
+datos_validos_globales %>% group_by(hora) %>% 
+  summarise(mean = mean(260*avb), sd=sd(260*avb)) %>% 
+  arrange(mean) %>% 
+  ggplot() + 
+    geom_pointrange(aes(x=hora,y=mean,ymax=mean+sd,ymin=mean-sd), color='blue')+
+    scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(x="Hora del Día", y="Bicis disponibles")
+
+```
+
+
+## Análisis según hora del día y día de la semana
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según hora del día y día de la semana.'}
+
+datos_validos_globales %>% group_by(dsem, hora) %>% 
+  summarise(mean = mean(260*avb)) %>% 
+  ggplot()+
+    geom_tile(aes(x=hora, y=dsem, fill=mean))+
+    scale_fill_gradientn(name='Bicis disp.', 
+                         colors = c('cyan','green','yellow','red'))+
+    scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(y="", x="")
+```
+
+## Análisis según condiciones meteorológicas
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según precipitación total diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=p,y=avb), color='blue')+
+    geom_smooth(aes(p, avb), method = lm, color="red")+
+    labs(y="Bicis disponibles", x="Precipitación (mm)")
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según temperatura mínima diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=tmin,y=avb), color='cyan')+
+    geom_smooth(aes(tmin, avb), method = lm, color = "red")+
+    labs(y="Bicis disponibles", x="Temperatura mínima (ºC)")
+```
+
+
+```{r fig.cap='Datos válidos globales. Bicis disponibles según temperatura máxmima diaria.'}
+
+datos_validos_globales %>% inner_join(meteo, by='fecha') %>%
+  ggplot()+
+    geom_point(aes(x=tmax,y=avb), color='orange')+
+    geom_smooth(aes(tmax, avb), method = lm, color = "red")+
+    labs(y="Bicis disponibles", x="Temperatura máxima (ºC)")
+```
+
+
+# Análisis de datos válidos por estaciones
+
+```{r echo=TRUE}
+
+if (!"sevidata_num_fecha_hora_dsem" %in% ls()){
+sevidata_num_fecha_hora_dsem = 
+  dbQueryIf("sevidata_num_fecha_hora_dsem", con, 
+    "SELECT num, date(add_date) as fecha, 
+    EXTRACT(HOUR FROM add_date) as hora,
+    EXTRACT(ISODOW FROM add_date) as dsem,
+    count(add_date) as np5min,
+    date(add_date) in (select fecha from festivos) as fest,
+    min(availablestands) as mins,
+    max(availablestands) as maxs,
+    avg(availablestands) as avgs,
+    stddev(availablestands) as stds,
+    min(availablebikes) as minb,
+    max(availablebikes) as maxb,
+    avg(availablebikes) as avgb,
+    stddev(availablebikes) as stdb
+    FROM sevidata WHERE ok = 1 or ok = 6
+    GROUP BY num, fecha, hora, dsem ORDER BY num, fecha, hora;"
+)}
+
+```
+
+## Serie de bicis disponibles por estación
+
+
+```{r eval=FALSE}
+
+sevidata_num_fecha_hora_dsem %>%
+  mutate(fechahora=((year(fecha)*100 + month(fecha)) * 100 +
+    day(fecha)) * 100 + hora) %>% group_by(num,fechahora) %>%
+  summarise(pctb=mean(100*avgb/(avgb + avgs))) %>%
+  ggplot()+
+    geom_tile(aes(x=num, y=fechahora, fill=pctb))+
+    scale_fill_gradientn(colors = c('cyan','green','yellow','red'))+
+    #scale_x_continuous(breaks = c(0,2,4,6,8,10,12,14,16,18,20,22))+
+    labs(y="Fecha-hora", x="Estación")
+
+```
+
+
+
+
+```{r fig.width=7, fig.height=1.5}
+
+for (i in 1:259) {
+  plt = ggplot(sevidata_num_fecha_hora_dsem %>% filter(num==i))+
+    geom_line(aes(fecha, 100*avgb/(avgb + avgs)), color=i)+
+    labs(x="", y="%", subtitle=paste('Estación',i))+
+    scale_x_date(date_minor_breaks = "1 month")
+  print(plt)
+}
+
+```
+
+
+```{r fig.width=7, fig.height=1.5, fig.cap='Datos válidos estaciones. Series horarias.'}
+
+i=260
+plt = ggplot(sevidata_num_fecha_hora_dsem %>% filter(num==i))+
+    geom_line(aes(fecha, 100*avgb/(avgb + avgs)), color=i)+
+    labs(x="", y="%", subtitle=paste('Estación',i))+
+    scale_x_date(date_minor_breaks = "1 month")
+print(plt)
+
+```
